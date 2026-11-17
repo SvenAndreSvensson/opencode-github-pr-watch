@@ -5,6 +5,7 @@ import { PRS_TAB } from "../core/panel-tab";
 import type { MyPr, MyPrSort } from "../core/my-prs";
 import type { Topic } from "../core/topics";
 import { activities as trackActivities, keepMerged, panelOperations, type LoadedPrs, type PanelPort, type PanelSession } from "../core/panel-operations";
+import { DEMO_KEY, demoData, demoPort } from "../core/demo";
 import { lineDetail, pillView, prOfRow } from "../core/panel-text";
 import { CHOICE_KEYS, prsView, readChoices, type Grouping, type PrsChoices } from "../core/prs-view";
 import { PrWatch } from "../rpc";
@@ -45,8 +46,11 @@ export default Plugin.define({
   setup(ctx) {
     const [watches, setWatches] = createStore<Record<string, readonly Row[]>>({});
 
+    const demo = localStorage.getItem(DEMO_KEY) === "true";
     const load = (sessionID: string) =>
-      void ctx.client
+      demo
+        ? setWatches(sessionID, demoData(sessionID, Date.now()).sessionRows)
+        : void ctx.client
         .rpc(PrWatch)
         .list({ sessionID })
         .then((result) => setWatches(sessionID, (result as { watches: Row[] }).watches))
@@ -69,7 +73,7 @@ export default Plugin.define({
       },
     );
 
-    const port: PanelPort = {
+    const appPort: PanelPort = {
       myPrs: async (merged) => (await ctx.client.rpc(PrWatch).myPrs({ merged })) as LoadedPrs<Row>,
       myPrTopics: async (sessionID, merged) => ((await ctx.client.rpc(PrWatch).myPrTopics({ sessionID, merged })) as { topics: Topic[] }).topics,
       watch: async (sessionID, pr) => ((await ctx.client.rpc(PrWatch).watch({ sessionID, pr })) as { message: string }).message,
@@ -85,6 +89,7 @@ export default Plugin.define({
       openSession: (server, sessionID) => ctx.tabs.open({ server, id: sessionID as never }, { focus: true }),
       copy: (text) => ctx.system.copy(text),
     };
+    const port = demo ? demoPort(() => ctx.sessions.current()?.id ?? "", Date.now) : appPort;
 
     // Work in progress, shown together on the PRs tab's top line with one spinner, and the latest result after it.
     const [running, setRunning] = createSignal<readonly string[]>([]);
