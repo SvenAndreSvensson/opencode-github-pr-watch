@@ -2,7 +2,7 @@ import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js"
 import { createStore } from "solid-js/store";
 import { ComposerPill, createKeyed, Panel, Plugin, Style, type ComposerPillTone, type IconName } from "@opencode/plugin/gui";
 import { PRS_TAB } from "../core/panel-tab";
-import { byRepo, matchesSearch, organisationsOf, prList, prSessionPrompt, runWatches, withWatchedPrs, type MyPr, type MyPrSort } from "../core/my-prs";
+import { allPrs, byRepo, matchesSearch, organisationsOf, prList, prSessionPrompt, runWatches, withWatchedPrs, type MyPr, type MyPrSort } from "../core/my-prs";
 import { byTopic, type Topic } from "../core/topics";
 import { PrWatch } from "../rpc";
 
@@ -34,7 +34,8 @@ const SORT_KEY = "pr-watch.my-prs.sort";
 const DRAFTS_KEY = "pr-watch.my-prs.drafts";
 const OTHERS_KEY = "pr-watch.my-prs.others";
 const GROUPING_KEY = "pr-watch.my-prs.grouping";
-type Grouping = "repo" | "topic";
+type Grouping = "repo" | "topic" | "none";
+const GROUPINGS: readonly Grouping[] = ["repo", "topic", "none"];
 const SORTS: readonly { value: MyPrSort; label: string }[] = [
   { value: "name", label: "Sort by: Name" },
   { value: "newest", label: "Sort by: Newest PR" },
@@ -240,7 +241,7 @@ export default Plugin.define({
     // Topics come from a light model on the server, for the PRs listed; like the lists they stay while new ones load.
     // Kept across tab and session switches, but not stored: a search is for now.
     const [search, setSearch] = createSignal("");
-    const [grouping, setGrouping] = createSignal<Grouping>(localStorage.getItem(GROUPING_KEY) === "topic" ? "topic" : "repo");
+    const [grouping, setGrouping] = createSignal<Grouping>(GROUPINGS.find((g) => g === localStorage.getItem(GROUPING_KEY)) ?? "repo");
     const [topics, setTopics] = createSignal<readonly Topic[]>();
     const [topicsError, setTopicsError] = createSignal<string>();
     const loadTopics = (sessionID: string) => {
@@ -328,7 +329,7 @@ export default Plugin.define({
           <PrLineView
             text={
               <>
-                <Show when={byTopicNow()}>
+                <Show when={repoOnLine()}>
                   <span style={{ opacity: "0.6" }}>{line.pr.repo.slice(line.pr.repo.indexOf("/") + 1)} </span>
                 </Show>
                 #{line.pr.number} {line.pr.title}
@@ -348,17 +349,21 @@ export default Plugin.define({
 
       // Without topics yet (or when they failed), the list stays grouped by repo.
       const byTopicNow = () => grouping() === "topic" && topics() !== undefined;
+      // Each line names its repo unless the list is grouped by repo.
+      const repoOnLine = () => byTopicNow() || grouping() === "none";
       // Sorting repos by name means nothing for topics; there it falls back to newest first, without changing the choice.
       const effectiveSort = (): MyPrSort => (grouping() === "topic" && sort() === "name" ? "newest" : sort());
       const searched = (prs: readonly MyPr[]) => prs.filter((pr) => matchesSearch(pr, search()));
       const grouped = (prs: readonly MyPr[]) =>
-        byTopicNow()
-          ? byTopic(prs, topics()!, organisation() || undefined, effectiveSort(), drafts()).map((g) => ({ ...g, topic: true }))
-          : shown(prs).map((g) => ({ name: g.repo, prs: g.prs, topic: false }));
+        grouping() === "none"
+          ? [{ name: "All PRs", prs: allPrs(prs, organisation() || undefined, sort(), drafts()), kind: "all" as const }].filter((g) => g.prs.length > 0)
+          : byTopicNow()
+            ? byTopic(prs, topics()!, organisation() || undefined, effectiveSort(), drafts()).map((g) => ({ ...g, kind: "topic" as const }))
+            : shown(prs).map((g) => ({ name: g.repo, prs: g.prs, kind: "repo" as const }));
       const Groups = (groups: { readonly prs: readonly MyPr[]; readonly merged: boolean }): JSX.Element => (
         <For each={grouped(searched(groups.prs))}>
           {(group, index) => {
-            const slash = group.topic ? -1 : group.name.indexOf("/");
+            const slash = group.kind === "repo" ? group.name.indexOf("/") : -1;
             return (
               <section
                 style={{
@@ -367,7 +372,7 @@ export default Plugin.define({
                 }}
               >
                 <div style={{ display: "flex", "align-items": "center", gap: "6px", "min-width": "0" }}>
-                  <ctx.ui.Icon name={group.topic ? "bullet-list" : "folder"} size="small" />
+                  <ctx.ui.Icon name={group.kind === "repo" ? "folder" : group.kind === "topic" ? "bullet-list" : "checklist"} size="small" />
                   <div style={{ flex: "1", "min-width": "0", "overflow-wrap": "anywhere" }}>
                     <span style={{ opacity: "0.6" }}>{group.name.slice(0, slash + 1)}</span>
                     <span style={{ "font-weight": "600" }}>{group.name.slice(slash + 1)}</span>
@@ -427,6 +432,7 @@ export default Plugin.define({
             <select aria-label="Group by" value={grouping()} onChange={(event) => pickGrouping(event.currentTarget.value as Grouping)} style={SELECT_STYLE}>
               <option value="repo">Group by: Repo</option>
               <option value="topic">Group by: Topic</option>
+              <option value="none">Group by: None</option>
             </select>
             <select aria-label="Sort" value={effectiveSort()} onChange={(event) => pickSort(event.currentTarget.value as MyPrSort)} style={SELECT_STYLE}>
               <For each={SORTS}>

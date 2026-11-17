@@ -89,3 +89,10 @@ export function withWatchedPrs<R extends { readonly id: string; readonly label: 
 
 /** Watches of a workflow run without a PR. */
 export const runWatches = <R extends { readonly id: string }>(rows: readonly R[]): R[] => rows.filter((row) => !PR_WATCH.test(row.id));
+
+/** All PRs as one list: by repo then newest first ("name"), or by date; with the organisation and draft filters. */
+export function allPrs(prs: readonly MyPr[], organisation?: string, sort: MyPrSort = "name", drafts = true): MyPr[] {
+  return byRepo(prs, organisation, "name", drafts)
+    .flatMap((group) => group.prs)
+    .sort((a, b) => (sort === "name" ? 0 : sort === "oldest" ? newer(b, a) : newer(a, b)));
+}

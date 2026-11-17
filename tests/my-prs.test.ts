@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { byRepo, matchesSearch, myPrFrom, prList, runWatches, withWatchedPrs, organisationsOf, prSessionPrompt, type MyPr } from "../core/my-prs";
+import { allPrs, byRepo, matchesSearch, myPrFrom, prList, runWatches, withWatchedPrs, organisationsOf, prSessionPrompt, type MyPr } from "../core/my-prs";
 
 const pr = (repo: string, number: number, extra: Partial<MyPr> = {}): MyPr => ({
   repo, number, title: `PR ${number}`, url: `https://github.com/${repo}/pull/${number}`, draft: false, createdAt: "2026-11-10T10:00:00Z", ...extra,
@@ -104,5 +104,25 @@ describe("one list: my PRs and the watches", () => {
 
   test("watches of runs without a PR are listed apart", () => {
     expect(runWatches(rows).map((r) => r.id)).toEqual(["o/r run 9"]);
+  });
+});
+
+describe("no grouping: one list", () => {
+  const prs = [
+    pr("o/b", 1, { createdAt: "2026-11-01T10:00:00Z" }),
+    pr("o/a", 2, { createdAt: "2026-11-05T10:00:00Z" }),
+    pr("o/b", 3, { createdAt: "2026-11-10T10:00:00Z", draft: true }),
+    pr("x/c", 4, { createdAt: "2026-11-03T10:00:00Z" }),
+  ];
+  const numbers = (sort: "name" | "newest" | "oldest", org?: string, drafts = true) => allPrs(prs, org, sort, drafts).map((p) => p.number);
+
+  test("by name: by repo, newest first within it; by newest or oldest: by date", () => {
+    expect(numbers("name")).toEqual([2, 3, 1, 4]);
+    expect(numbers("newest")).toEqual([3, 2, 4, 1]);
+    expect(numbers("oldest")).toEqual([1, 4, 2, 3]);
+  });
+
+  test("the organisation and drafts filters apply", () => {
+    expect(numbers("name", "o", false)).toEqual([2, 1]);
   });
 });
