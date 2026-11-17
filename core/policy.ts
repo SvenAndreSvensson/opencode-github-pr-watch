@@ -21,10 +21,8 @@ const STALE_AFTER: Record<Trigger, readonly Step[]> = {
 const GRACE_MS: Record<Trigger, number> = { rerun: TRIGGER_GRACE_MS, "update-branch": TRIGGER_GRACE_MS, "failed-checks": 30 * MINUTE, behind: 30 * MINUTE };
 
 // Steps where nothing happens until a person acts (review, merge, branch update, environment approval, rerun).
-const WAITING_ON_PEOPLE = new Set<Step>([
-  "DRAFT", "RESOLVE_CONFLICT", "FIX_CHECKS", "ADDRESS_REVIEW", "UPDATE_BRANCH", "NEEDS_REVIEW", "READY",
-  "CHECKS_WAITING", "DEPLOY_WAITING",
-]);
+// Run approvals aren't here: they tend to come soon after the request, so they're checked every minute.
+const WAITING_ON_PEOPLE = new Set<Step>(["DRAFT", "RESOLVE_CONFLICT", "FIX_CHECKS", "ADDRESS_REVIEW", "UPDATE_BRANCH", "NEEDS_REVIEW", "READY"]);
 
 export function events(prev: PrFacts | undefined, next: PrFacts, now: number): string[] {
   if (!prev) return [];

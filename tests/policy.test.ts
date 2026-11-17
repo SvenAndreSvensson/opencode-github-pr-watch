@@ -289,7 +289,7 @@ describe("reminderDue", () => {
 
     expect(phaseOf(gate, NOW)).toEqual({ phase: "approval" });
     expect(reminderDue(gate, NOW - 25 * 3_600_000, undefined, NOW)).toBe(true);
-    expect(pollDelay(gate, NOW)).toBe(5 * 60_000);
+    expect(pollDelay(gate, NOW)).toBe(60_000);
   });
 
   test("no reminders in other phases", () => {
@@ -308,10 +308,16 @@ describe("pollDelay", () => {
   });
 
   test.each([
+    [aFacts({ checks: "PENDING", waitingChecks: ["Plan"] }), 60_000],
+    [merged({ deploy: "WAITING" }), 60_000],
+  ])("polls every minute while a run waits for approval: approvals tend to come soon after the request", (facts, delay) => {
+    expect(pollDelay(facts, NOW)).toBe(delay);
+  });
+
+  test.each([
     aFacts({ review: "REVIEW_REQUIRED" }),
     aFacts(),
     aFacts({ branch: "BEHIND" }),
-    merged({ deploy: "WAITING" }),
   ])("polls every five minutes while waiting on people", (facts) => {
     expect(pollDelay(facts, NOW)).toBe(5 * 60_000);
   });
