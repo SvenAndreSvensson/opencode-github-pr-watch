@@ -15,6 +15,7 @@ interface Row {
   readonly runUrl?: string;
   readonly waitingFor?: "code-review" | "run-approval";
   readonly runLinks?: readonly { readonly label: string; readonly url: string }[];
+  readonly notify?: "major" | "all";
   /** The session watching it, in the panel's list. */
   readonly sessionID?: string;
   readonly sessionTitle?: string;
@@ -126,6 +127,22 @@ export default Plugin.define({
           <Show when={line.onOpenSession}>
             {(open) => <ctx.ui.IconButton icon="speech-bubble" label={`Open the watching session: ${line.row?.sessionTitle ?? ""}`} size="small" onClick={() => open()()} />}
           </Show>
+          <Show when={line.row}>
+            {(row) => {
+              const all = () => row().notify === "all";
+              return (
+                // The bell: full when every bit of progress is reported, dimmed when only changes of step are.
+                <span style={{ display: "inline-flex", opacity: all() ? "1" : "0.45" }}>
+                  <ctx.ui.IconButton
+                    icon="notifications"
+                    label={all() ? "Reporting all progress; click to report only changes of step" : "Reporting changes of step; click to report all progress"}
+                    size="small"
+                    onClick={() => setNotify(row().id, all() ? "major" : "all")}
+                  />
+                </span>
+              );
+            }}
+          </Show>
           <For each={runLinks()}>
             {(link) => (
               // A gear for the build or deploy run; it turns while the run is still going.
@@ -179,6 +196,16 @@ export default Plugin.define({
       setTimeout(() => setStatus((now) => (now === text ? undefined : now)), 6_000);
     };
     const failed = (what: string) => (err: unknown) => say(`${what}: ${err instanceof Error ? err.message : String(err)}`);
+
+    const setNotify = (id: string, notify: "major" | "all") =>
+      void track(notify === "all" ? `Reporting all progress for ${id}…` : `Reporting only changes of step for ${id}…`, ctx.client.rpc(PrWatch).setNotify({ id, notify }))
+        .then(() => {
+          say(notify === "all" ? `${id}: all progress will be reported.` : `${id}: only changes of step will be reported.`);
+          const sessionID = ctx.sessions.current()?.id;
+          if (sessionID) load(sessionID);
+          loadMyPrs();
+        })
+        .catch(failed(`Could not change what ${id} reports`));
 
     const stopWatching = (id: string) =>
       void track(`Stopping watching ${id}…`, ctx.client.rpc(PrWatch).unwatch({ id }))

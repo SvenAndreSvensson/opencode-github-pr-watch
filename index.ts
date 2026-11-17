@@ -482,6 +482,17 @@ export default Plugin.define({
         debug("panel-watch", { sessionID, pr });
         return { message: await startWatch(sessionID, pr) };
       },
+      // The panel's bell: switches a running watch between reporting each change of step and progress too.
+      setNotify: async (input) => {
+        const { id, notify } = input as { id: string; notify: Notify };
+        const watch = (await ctx.storage.get(KEY_PREFIX + id)) as unknown as Watch | undefined;
+        if (!watch) return {};
+        const { notify: _old, ...rest } = watch;
+        await ctx.storage.set(KEY_PREFIX + id, (notify === "all" ? { ...rest, notify } : rest) as never);
+        debug("notify-set", { id, notify });
+        changed(watch.sessionID);
+        return {};
+      },
       unwatch: async (input) => {
         const { id } = input as { id: string };
         // Only ids of existing watches; a stop for anything else does nothing.
@@ -528,7 +539,9 @@ export default Plugin.define({
           }
           return;
         }
-        await ctx.storage.set(KEY_PREFIX + id, result.watch as never);
+        // The notify setting can be switched from the panel while a check runs; the stored one wins.
+        const { notify: _checked, ...checked } = result.watch;
+        await ctx.storage.set(KEY_PREFIX + id, (latest?.notify ? { ...checked, notify: latest.notify } : checked) as never);
         changed(result.watch.sessionID);
         delayMs = result.delayMs > 0 ? alignedDelay(Date.now(), result.delayMs) : result.delayMs;
       } catch (err) {

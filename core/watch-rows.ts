@@ -16,6 +16,8 @@ export interface WatchRow {
   readonly waitingFor?: "code-review" | "run-approval";
   /** Several runs to open (the runs ahead of the PR's queued checks); `runUrl` is the first. */
   readonly runLinks?: readonly { readonly label: string; readonly url: string }[];
+  /** What the watch reports: each change of step, or progress within a step too. */
+  readonly notify: "major" | "all";
 }
 
 // "3/4 · DEPLOY - Prod" while going, ", 4 steps done" once all of them are.
@@ -102,6 +104,7 @@ export function watchRows(watches: readonly Watch[], sessionID: string, now: num
       const base = step && watch.lastFacts ? step.detail(watch.lastFacts) : "not checked yet";
       return {
         id: watch.id,
+        notify: watch.notify ?? "major",
         label: title ? `${watch.id} ${title}` : watch.id,
         url: watch.run ? `https://github.com/${watch.repo}/actions/runs/${watch.run}` : `https://github.com/${watch.repo}/pull/${watch.pr}`,
         detail: approving
