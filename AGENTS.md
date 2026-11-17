@@ -1,6 +1,6 @@
 # AGENTS.md
 
-OpenCode V2 plugin that watches GitHub PRs until deployed. Behaviour is documented in `README.md`; keep it in sync when behaviour changes.
+OpenCode V2 plugin that watches GitHub PRs until deployed. Behaviour is documented in `docs/` (the README is a short overview that links there); keep both in sync when behaviour changes.
 
 ## Workflow
 
