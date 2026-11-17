@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { claimPolling, dropMessagesFor, newProcessState, ownsPolling, releasePolling, resumeChanged, shouldAnnounceResume } from "../core/runtime";
+import { claimPolling, dropMessagesFor, newProcessState, onCheckNow, ownsPolling, releasePolling, requestChecks, resumeChanged, shouldAnnounceResume } from "../core/runtime";
 
 describe("resume announcements", () => {
   test("only the first setup for a directory in a process announces resumed watches", () => {
@@ -60,5 +60,37 @@ describe("poll loop ownership", () => {
 describe("dropMessagesFor", () => {
   test("drops queued messages about an unwatched PR, keeps the rest", () => {
     expect(dropMessagesFor(["o/r#1: approved", "o/r#12: merged", "o/r#1: deployed"], "o/r#1")).toEqual(["o/r#12: merged"]);
+  });
+});
+
+describe("check now: the panel's reload asks every poll loop in the process to check its watches", () => {
+  test("each directory's current owner checks; a replaced owner doesn't", () => {
+    const state = newProcessState();
+    const ran: string[] = [];
+    const old = Symbol("old");
+    const a = Symbol("a");
+    const b = Symbol("b");
+    claimPolling(state, "/a", old);
+    onCheckNow(state, "/a", old, () => ran.push("old"));
+    claimPolling(state, "/a", a);
+    onCheckNow(state, "/a", a, () => ran.push("a"));
+    claimPolling(state, "/b", b);
+    onCheckNow(state, "/b", b, () => ran.push("b"));
+
+    expect(requestChecks(state, 0)).toBe(true);
+    expect(ran).toEqual(["a", "b"]);
+  });
+
+  test("asks again within 20 seconds are ignored, so repeated reloads don't flood GitHub", () => {
+    const state = newProcessState();
+    const ran: number[] = [];
+    const owner = Symbol("o");
+    claimPolling(state, "/a", owner);
+    onCheckNow(state, "/a", owner, () => ran.push(1));
+
+    expect(requestChecks(state, 1_000)).toBe(true);
+    expect(requestChecks(state, 15_000)).toBe(false);
+    expect(requestChecks(state, 21_000)).toBe(true);
+    expect(ran).toEqual([1, 1]);
   });
 });

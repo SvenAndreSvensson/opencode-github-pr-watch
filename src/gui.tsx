@@ -7,7 +7,7 @@ import type { Topic } from "../core/topics";
 import { activities as trackActivities, keepMerged, panelOperations, type LoadedPrs, type PanelPort, type PanelSession } from "../core/panel-operations";
 import { DEMO_KEY, demoData, demoPort } from "../core/demo";
 import { lineDetail, pillView, prOfRow } from "../core/panel-text";
-import { ALL_STATUSES, CHOICE_KEYS, prsView, readChoices, STATUS_LABELS, statusSummary, type Grouping, type PrsChoices } from "../core/prs-view";
+import { ALL_STATUSES, CHOICE_KEYS, prsView, readChoices, STATUS_LABELS, statusSummary, toggleStatus, type Grouping, type PrsChoices } from "../core/prs-view";
 import { PrWatch } from "../rpc";
 
 interface Row {
@@ -78,6 +78,7 @@ export default Plugin.define({
       myPrTopics: async (sessionID, merged) => ((await ctx.client.rpc(PrWatch).myPrTopics({ sessionID, merged })) as { topics: Topic[] }).topics,
       watch: async (sessionID, pr) => ((await ctx.client.rpc(PrWatch).watch({ sessionID, pr })) as { message: string }).message,
       unwatch: async (id) => void (await ctx.client.rpc(PrWatch).unwatch({ id })),
+      checkNow: async () => ((await ctx.client.rpc(PrWatch).checkNow({})) as { checking: boolean }).checking,
       setNotify: async (id, notify) => void (await ctx.client.rpc(PrWatch).setNotify({ id, notify })),
       session: async (sessionID) => {
         const current = await ctx.client.session.get({ sessionID: sessionID as never });
@@ -377,15 +378,21 @@ export default Plugin.define({
                   background: "var(--background-base, #1e1e1e)", border: "1px solid rgba(127,127,127,0.4)", "box-shadow": "0 4px 12px rgba(0,0,0,0.3)",
                 }}
               >
+                <label style={{ display: "flex", "align-items": "center", gap: "6px", cursor: "pointer", "white-space": "nowrap", "padding-bottom": "6px", "border-bottom": "1px solid rgba(127,127,127,0.25)" }}>
+                  <input
+                    type="checkbox"
+                    checked={choices().statuses.length === ALL_STATUSES.length}
+                    onChange={(event) => choose("statuses", toggleStatus(choices().statuses, "all", event.currentTarget.checked))}
+                  />
+                  All
+                </label>
                 <For each={ALL_STATUSES}>
                   {(status) => (
                     <label style={{ display: "flex", "align-items": "center", gap: "6px", cursor: "pointer", "white-space": "nowrap" }}>
                       <input
                         type="checkbox"
                         checked={choices().statuses.includes(status)}
-                        onChange={(event) =>
-                          choose("statuses", ALL_STATUSES.filter((s) => (s === status ? event.currentTarget.checked : choices().statuses.includes(s))))
-                        }
+                        onChange={(event) => choose("statuses", toggleStatus(choices().statuses, status, event.currentTarget.checked))}
                       />
                       {STATUS_LABELS[status]}
                     </label>
@@ -395,10 +402,11 @@ export default Plugin.define({
             </details>
             <ctx.ui.IconButton
               icon="refresh"
-              label="Reload"
               size="small"
+              label="Reload, and make every watch check GitHub now"
               onClick={() => {
                 if (myPrsLoading() === 0) load();
+                void ops.checkNow();
               }}
             />
           </div>

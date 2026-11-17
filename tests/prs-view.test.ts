@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ALL_STATUSES, CHOICE_KEYS, prsView, readChoices, statusOf, statusSummary, type PrsChoices } from "../core/prs-view";
+import { ALL_STATUSES, CHOICE_KEYS, prsView, readChoices, statusOf, statusSummary, toggleStatus, type PrsChoices } from "../core/prs-view";
 import type { MyPr } from "../core/my-prs";
 
 const pr = (repo: string, number: number, extra: Partial<MyPr> = {}): MyPr => ({
@@ -92,6 +92,13 @@ describe("statuses: what a line's watch says about it", () => {
     expect(statusOf({ tone: "pending" })).toBe("progress");
     expect(statusOf({ tone: "pending", waitingFor: "run-approval" })).toBe("approval");
     expect(statusOf({ tone: "done" })).toBe("done");
+  });
+
+  test("ticking a status, or All for every one of them; the order stays the dropdown's", () => {
+    expect(toggleStatus(["done"], "review", true)).toEqual(["review", "done"]);
+    expect(toggleStatus(["review", "done"], "review", false)).toEqual(["done"]);
+    expect(toggleStatus(["done"], "all", true)).toEqual(ALL_STATUSES);
+    expect(toggleStatus(ALL_STATUSES, "all", false)).toEqual([]);
   });
 
   test("the dropdown says what is chosen", () => {

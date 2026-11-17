@@ -10,6 +10,8 @@ export interface PanelPort {
   myPrTopics(sessionID: string, merged: boolean): Promise<readonly Topic[]>;
   watch(sessionID: string, pr: string): Promise<string>;
   unwatch(id: string): Promise<void>;
+  /** False when the watches were asked less than 20 seconds ago, and so don't check again. */
+  checkNow(): Promise<boolean>;
   setNotify(id: string, notify: "major" | "all"): Promise<void>;
   session(sessionID: string): Promise<{ readonly model: unknown; readonly agent: string | undefined }>;
   createSession(input: { readonly title: string; readonly directory: string; readonly model: unknown; readonly agent: string | undefined }): Promise<string>;
@@ -62,6 +64,11 @@ export function panelOperations(port: PanelPort, feedback: Feedback) {
       const id = `${pr.repo}#${pr.number}`;
       return act(async () => say((await track(`Starting watching ${id}…`, port.watch(sessionID, id))).split(". ")[0]!), `Could not watch ${id}`);
     },
+    checkNow: () =>
+      act(async () => {
+        const checking = await track("Asking every watch to check GitHub…", port.checkNow());
+        say(checking ? "Every watch is checking GitHub now." : "The watches checked GitHub less than 20 seconds ago.");
+      }, "Could not ask the watches to check"),
     stop: (id: string) =>
       act(async () => {
         await track(`Stopping watching ${id}…`, port.unwatch(id));

@@ -8,16 +8,22 @@ export interface ProcessState {
   readonly owners: Map<string, symbol>;
   /** The poll timers of each directory, shared so a new owner can cancel the previous owner's loop. */
   readonly timers: Map<string, Map<string, ReturnType<typeof setTimeout>>>;
+  /** Each directory's "check every watch now", registered by the instance that owned the loop then. */
+  readonly checkers: Map<string, { readonly owner: symbol; readonly run: () => void }>;
+  lastCheckNowAt?: number;
 }
 
-export const newProcessState = (): ProcessState => ({ resumed: new Set(), owners: new Map(), timers: new Map() });
+export const newProcessState = (): ProcessState => ({ resumed: new Set(), owners: new Map(), timers: new Map(), checkers: new Map() });
 
 const KEY = Symbol.for("opencode-pr-watch/process");
 
 // On globalThis, because the host may import the module afresh for each instance.
 export const processState = (): ProcessState => {
   const global = globalThis as unknown as Record<symbol, ProcessState | undefined>;
-  return (global[KEY] ??= newProcessState());
+  const state = (global[KEY] ??= newProcessState());
+  // A state made by an older version of this module (kept across a hot reload) lacks the newer fields.
+  (state as { checkers?: ProcessState["checkers"] }).checkers ??= new Map();
+  return state;
 };
 
 /** Makes `owner` the only poll loop for the directory and returns its (emptied) timer map. */
@@ -54,3 +60,17 @@ export const resumeChanged = (lastSent: string | undefined, message: string) => 
 
 /** Queued messages are "<owner/repo#pr>: <text>"; drops those about a PR that is no longer watched. */
 export const dropMessagesFor = (messages: readonly string[], id: string) => messages.filter((m) => !m.startsWith(`${id}: `));
+
+const CHECK_NOW_EVERY_MS = 20_000;
+
+export function onCheckNow(state: ProcessState, directory: string, owner: symbol, run: () => void): void {
+  state.checkers.set(directory, { owner, run });
+}
+
+/** Runs every loop's check now, unless that was asked less than 20 seconds ago. Returns whether it ran. */
+export function requestChecks(state: ProcessState, now: number): boolean {
+  if (state.lastCheckNowAt !== undefined && now - state.lastCheckNowAt < CHECK_NOW_EVERY_MS) return false;
+  state.lastCheckNowAt = now;
+  for (const [directory, checker] of state.checkers) if (state.owners.get(directory) === checker.owner) checker.run();
+  return true;
+}

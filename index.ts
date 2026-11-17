@@ -19,7 +19,7 @@ import { matchWorkflow, parseRole, rolePrompt, type WorkflowRole } from "./core/
 import { configureGh, myMergedPrs, myOpenPrs, setGithubDebug, workflowSummary, type RoleLookup, currentBranchPrUrl, failureExcerpt, runFailureExcerpt, runSnapshot, viewRun, runningPipelines, runProgress, workflowDurations, parsePrReference, prForRun, prSnapshot, resolveRepo, runGh } from "./core/github";
 import { findBranchUpdates, findPrMerges, findRunReruns , alreadyUpToDate , findBotRefreshes } from "./core/merge-detection";
 import { formatWatch } from "./core/listing";
-import { claimPolling, dropMessagesFor, ownsPolling, processState, releasePolling, resumeChanged, shouldAnnounceResume } from "./core/runtime";
+import { claimPolling, dropMessagesFor, onCheckNow, ownsPolling, processState, releasePolling, requestChecks, resumeChanged, shouldAnnounceResume } from "./core/runtime";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { notificationCommands } from "./core/desktop-notification";
@@ -391,6 +391,9 @@ export default Plugin.define({
     const shared = processState();
     const owner = Symbol(directory);
     const timers = claimPolling(shared, directory, owner);
+    onCheckNow(shared, directory, owner, () => {
+      for (const id of [...timers.keys()]) schedule(id, 0);
+    });
     const owning = () => ownsPolling(shared, directory, owner);
 
     const topicCache = new Map<string, Promise<Topic[]>>();
@@ -429,6 +432,11 @@ export default Plugin.define({
         return { sessions };
       },
       // The gh user's own PRs for the side panel. Search results are kept a minute, as every open panel asks.
+      checkNow: async () => {
+        const checking = requestChecks(shared, Date.now());
+        debug("check-now", { checking });
+        return { checking };
+      },
       myPrs: async (input) => {
         const { merged } = input as { merged?: boolean };
         const cwd = directory;

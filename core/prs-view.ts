@@ -19,6 +19,12 @@ export const STATUS_LABELS: Record<Status, string> = {
   unwatched: "Not watched",
 };
 
+/** The chosen statuses after ticking or unticking one, or "all". */
+export function toggleStatus(chosen: readonly Status[], status: Status | "all", on: boolean): readonly Status[] {
+  if (status === "all") return on ? ALL_STATUSES : [];
+  return ALL_STATUSES.filter((s) => (s === status ? on : chosen.includes(s)));
+}
+
 /** The status dropdown's button text. */
 export function statusSummary(chosen: readonly Status[]): string {
   if (chosen.length === ALL_STATUSES.length) return "Status: All";

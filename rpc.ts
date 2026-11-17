@@ -109,6 +109,11 @@ export const PrWatch = Rpc.define({
       input: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false },
       output: { type: "object", additionalProperties: false },
     },
+    // Every watch checks GitHub now, instead of at its next turn; ignored if asked within the last 20 seconds.
+    checkNow: {
+      input: { type: "object", additionalProperties: false },
+      output: { type: "object", properties: { checking: { type: "boolean" } }, required: ["checking"], additionalProperties: false },
+    },
   },
   events: {
     changed: {

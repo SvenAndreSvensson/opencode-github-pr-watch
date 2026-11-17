@@ -25,6 +25,11 @@ class FakePort implements PanelPort {
     return `Watching ${pr}. summary: x. More text`;
   }
   async unwatch(id: string) { this.fail(`unwatch ${id}`); }
+  recentCheck = false;
+  async checkNow() {
+    this.fail("checkNow");
+    return !this.recentCheck;
+  }
   async setNotify(id: string, notify: "major" | "all") { this.fail(`setNotify ${id} ${notify}`); }
   async session(sessionID: string) {
     this.fail(`session ${sessionID}`);
@@ -107,6 +112,27 @@ describe("panel operations", () => {
     expect(log).toEqual(["… Loading your PRs…", "… Sorting your PRs into topics…", "… Updating the topics…"]);
     port.failing = "myPrs";
     await expect(ops.loadPrs(false)).rejects.toThrow("myPrs broke");
+  });
+});
+
+describe("check now: the reload button makes every watch check GitHub", () => {
+  test("says the watches are checking, or that they just did", async () => {
+    const { port, log, ops } = setup();
+    await ops.checkNow();
+    port.recentCheck = true;
+    await ops.checkNow();
+    expect(port.calls).toEqual(["checkNow", "checkNow"]);
+    expect(log).toEqual([
+      "… Asking every watch to check GitHub…", "Every watch is checking GitHub now.",
+      "… Asking every watch to check GitHub…", "The watches checked GitHub less than 20 seconds ago.",
+    ]);
+  });
+
+  test("a failure says why", async () => {
+    const { port, log, ops } = setup();
+    port.failing = "checkNow";
+    expect(await ops.checkNow()).toBe(false);
+    expect(log.at(-1)).toBe("Could not ask the watches to check: checkNow broke");
   });
 });
 

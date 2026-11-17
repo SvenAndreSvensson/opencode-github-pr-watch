@@ -70,6 +70,7 @@ export function demoPort(sessionID: () => string, now: () => number): PanelPort 
     ],
     watch: async (_, pr) => `Watching ${pr}. Demo mode`,
     unwatch: async () => undefined,
+    checkNow: async () => true,
     setNotify: async () => undefined,
     session: async () => ({ model: undefined, agent: undefined }),
     createSession: async () => "ses_demo",
