@@ -54,10 +54,9 @@ export interface PrsView<R extends WatchRowLike> {
 
 export function prsView<R extends WatchRowLike>(data: PrsData<R>, choices: PrsChoices, sessionID: string, topics?: readonly Topic[]): PrsView<R> {
   const rows = data.watchedRows;
-  // This session's watches only, whoever opened the PR; otherwise my PRs, plus others' watched ones when shown.
-  const open = choices.sessionOnly
-    ? watchedIn(withWatchedPrs(data.open, rows), rows, sessionID)
-    : choices.others ? withWatchedPrs(data.open, rows) : [...data.open];
+  // My PRs, plus others' watched ones when shown; with "current session only", just those this session watches.
+  const listed = choices.others ? withWatchedPrs(data.open, rows) : [...data.open];
+  const open = choices.sessionOnly ? watchedIn(listed, rows, sessionID) : listed;
   const merged = data.merged && (choices.sessionOnly ? watchedIn(data.merged, rows, sessionID) : data.merged);
   const byTopicNow = choices.grouping === "topic" && topics !== undefined;
   const effectiveSort: MyPrSort = choices.grouping === "topic" && choices.sort === "name" ? "newest" : choices.sort;

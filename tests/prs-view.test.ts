@@ -38,6 +38,11 @@ describe("prsView: what the PRs tab shows", () => {
     expect(prsView({ ...data, watchedRows: [] }, choices({ sessionOnly: true }), "s2").openEmpty).toBe("No PRs watched in this session.");
   });
 
+  test("current session only, without others' PRs: only my PRs this session watches", () => {
+    const view = prsView({ ...data, watchedRows: [...data.watchedRows, row("bot/dep#7", "s1")] }, choices({ sessionOnly: true, others: false }), "s1");
+    expect(numbers(view.open)).toEqual([2]);
+  });
+
   test("no grouping: one list, lines show their repo", () => {
     const view = prsView(data, choices({ grouping: "none" }), "s1");
     expect(view.open.map((g) => [g.kind, g.name])).toEqual([["all", "All PRs"]]);
