@@ -1,0 +1,51 @@
+{
+  "name": "opencode-pr-watch",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that watches GitHub pull requests and workflow runs until a person has to act or the change is deployed, with a desktop pill and a PRs side panel",
+  "type": "module",
+  "files": [
+    "index.ts",
+    "rpc.ts",
+    "core/",
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "prepublishOnly": "bun test && vite build"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "github",
+    "pull-requests",
+    "ci",
+    "deploy"
+  ],
+  "author": "Anders Sveen <anders@f12.no>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anderssv/opencode-pr-watch.git"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@opencode/plugin": "2.3.0",
+    "@opencode/schema": "2.3.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "@types/node": "^26.6.4",
+    "solid-js": "^1.9.19",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vite-plugin-solid": "^2.11.16"
+  },
+  "exports": {
+    ".": "./index.ts",
+    "./rpc": "./rpc.ts",
+    "./gui-experimental": "./dist/gui-experimental.cjs"
+  }
+}

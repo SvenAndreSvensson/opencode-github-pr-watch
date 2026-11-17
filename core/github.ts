@@ -1,0 +1,541 @@
+import { existsSync } from "node:fs";
+import { findGh, ghFailure, mergePaths, PATH_MARKER, pathFromShell } from "./gh-binary";
+import { logTail } from "./log-excerpt";
+import { approvalLine, upToDateLine } from "./pr-status";
+import type { WorkflowRole, WorkflowSummary } from "./workflow-role";
+import { checkName, factsFrom, isDeployJob, latestAttempts, pipelineChecks, summaryLine, type CheckView, type JobView, type PrFacts, type PrView, type RunWithJobs } from "./pr-facts";
+import { noDebugLog, tolerate, type DebugLog } from "./debug-log";
+import { myPrFrom, type MyPr, type SearchedPr } from "./my-prs";
+import { runFacts } from "./run-facts";
+import { planSummary, type TerraformPlan } from "./terraform";
+import type { Snapshot } from "./watcher";
+import { execFile } from "node:child_process";
+
+export type Gh = (args: string[], cwd: string) => Promise<string>;
+
+let ghBinary: string | undefined;
+let debug: DebugLog = noDebugLog;
+
+/** Where tolerated read failures (optional facts and text) are logged. */
+export const setGithubDebug = (log: DebugLog) => {
+  debug = log;
+};
+
+let ghEnv: NodeJS.ProcessEnv | undefined;
+
+// An app started from the Dock doesn't get the terminal's PATH; the login shell knows it (Homebrew, mise, ...).
+// Interactive, so .zshrc counts too; markers skip anything the startup files print.
+function loginShellPath(): Promise<string | undefined> {
+  const shell = process.env.SHELL || "/bin/zsh";
+  return new Promise((resolve) => {
+    execFile(shell, ["-ilc", `printf '${PATH_MARKER}%s${PATH_MARKER}' "$PATH"`], { timeout: 10_000 }, (err, stdout) =>
+      resolve(err ? undefined : pathFromShell(stdout)),
+    );
+  });
+}
+
+/** Finds `gh` once at load, with the login shell's PATH; returns undefined when it can't be found anywhere. */
+export async function configureGh(configured?: string): Promise<string | undefined> {
+  const shellPath = await loginShellPath();
+  const path = shellPath ? mergePaths(shellPath, process.env.PATH ?? "") : process.env.PATH;
+  ghEnv = { ...process.env, ...(path ? { PATH: path } : {}) };
+  ghBinary = findGh({ ...(configured ? { configured } : {}), ...(path ? { path } : {}) }, existsSync);
+  return ghBinary;
+}
+
+export const runGh: Gh = (args, cwd) =>
+  new Promise((resolve, reject) => {
+    execFile(ghBinary ?? "gh", args, { cwd, maxBuffer: 10 * 1024 * 1024, timeout: 60_000, ...(ghEnv ? { env: ghEnv } : {}) }, (err, stdout, stderr) => {
+      if (err) reject(new Error(ghFailure(err, args, stderr)));
+      else resolve(stdout);
+    });
+  });
+
+const PR_FIELDS = "headRefOid,author,state,isDraft,baseRefName,title,url,reviewDecision,mergeStateStatus,autoMergeRequest,mergedAt,mergeCommit,statusCheckRollup";
+
+
+export interface RunView {
+  databaseId: number;
+  workflowName: string;
+  /** Unique, unlike the name: GitHub's default CodeQL setup and a codeql.yml can both be called "CodeQL". */
+  workflowDatabaseId?: number;
+  status: string;
+  conclusion: string;
+  event: string;
+  createdAt: string;
+  url: string;
+}
+
+export const runLine = (run: RunView) =>
+  `  - ${run.workflowName} [${run.event}] started ${run.createdAt}: ${run.status} ${run.conclusion} ${run.url}`.replace(/ +$/, "");
+
+const checkLine = (c: CheckView) =>
+  `  - ${c.name ?? c.context}: ${c.status ?? ""} ${c.conclusion ?? c.state ?? ""}`.trimEnd();
+
+// Undefined when GitHub has nothing there (an unprotected branch) or won't show it to us (classic branch protection
+// needs admin rights; the rules API covers that case). Any other failure throws.
+async function apiJson<T>(gh: Gh, path: string, cwd: string): Promise<T | undefined> {
+  try {
+    return JSON.parse(await gh(["api", path], cwd)) as T;
+  } catch (err) {
+    if (!/HTTP 40[34]|Not Found/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    debug("tolerated-error", { what: "not visible", path, error: err });
+    return undefined;
+  }
+}
+
+/**
+ * The checks the base branch requires before a merge, from classic branch protection and rulesets.
+ * A source that can't be read contributes nothing rather than failing the snapshot.
+ */
+export async function requiredChecks(gh: Gh, repo: string, base: string, cwd: string): Promise<string[]> {
+  const branch = await apiJson<{ protection?: { required_status_checks?: { contexts?: string[] } } }>(
+    gh, `repos/${repo}/branches/${base}`, cwd,
+  );
+  const rules = await apiJson<{ type: string; parameters?: { required_status_checks?: { context: string }[] } }[]>(
+    gh, `repos/${repo}/rules/branches/${base}`, cwd,
+  );
+  const fromRules = (rules ?? [])
+    .filter((rule) => rule.type === "required_status_checks")
+    .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
+    .map((check) => check.context);
+  return [...new Set([...(branch?.protection?.required_status_checks?.contexts ?? []), ...fromRules])].sort();
+}
+
+/** The model's judgement of a workflow's role, cached by the caller; undefined when it can't be judged. */
+export type RoleLookup = (workflowID: number) => Promise<WorkflowRole | undefined>;
+
+export async function prSnapshot(
+  gh: Gh,
+  repo: string,
+  pr: number,
+  cwd: string,
+  now = Date.now(),
+  roleOf?: RoleLookup,
+  noDeploy = false,
+): Promise<Snapshot> {
+  let view: PrView;
+  try {
+    view = JSON.parse(await gh(["pr", "view", String(pr), "--repo", repo, "--json", PR_FIELDS], cwd));
+  } catch (err) {
+    debug("read-failed", { repo, pr, what: "PR", error: err });
+    return { text: `Could not read the PR: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  const runs: RunWithJobs[] = [];
+  let listed: RunView[] = [];
+  if (view.mergeCommit) {
+    try {
+      listed = JSON.parse(
+        await gh(
+          ["run", "list", "--repo", repo, "--commit", view.mergeCommit.oid, "--json", "databaseId,workflowName,workflowDatabaseId,status,conclusion,event,createdAt,url,attempt"],
+          cwd,
+        ),
+      );
+      const workflowIDs = [...new Set(listed.filter((r) => r.event === "push" && r.workflowDatabaseId !== undefined).map((r) => r.workflowDatabaseId!))];
+      // Without a role the workflow is judged from its job names, as before roles existed.
+      const roles = new Map(
+        await Promise.all(workflowIDs.map(async (id) => [id, await tolerate(debug, "workflow role", roleOf?.(id), undefined, { repo, workflow: id })] as const)),
+      );
+      for (const run of [...listed].sort((a, b) => a.databaseId - b.databaseId)) {
+        const jobs = run.event === "push" ? await jobsOf(gh, repo, run.databaseId, cwd) : [];
+        const pending = run.event === "push" && run.status !== "completed" && !jobs.some(isDeployJob);
+        const usuallyDeploys = pending && run.workflowDatabaseId !== undefined && (await workflowUsuallyDeploys(gh, repo, run.workflowDatabaseId, cwd));
+        const role = run.event === "push" && run.workflowDatabaseId !== undefined ? roles.get(run.workflowDatabaseId) : undefined;
+        runs.push({ ...run, jobs, ...(usuallyDeploys ? { usuallyDeploys } : {}), ...(role ? { role } : {}) });
+      }
+    } catch (err) {
+      // Facts from a partial read would be wrong (no runs reads as "no deploy started"); decide nothing this round.
+      debug("read-failed", { repo, pr, what: "workflow runs", error: err });
+      return { text: `Could not read the workflow runs: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  let required: string[];
+  let rerunning: string[];
+  let baseRuns: RunWithJobs[];
+  try {
+    required = view.state === "OPEN" ? await requiredChecks(gh, repo, view.baseRefName, cwd) : [];
+    rerunning = view.state === "OPEN" ? await runningWorkflows(gh, repo, view.headRefOid, cwd) : [];
+    baseRuns = view.state === "OPEN" ? await runningBaseDeploys(gh, repo, view.baseRefName, cwd) : [];
+  } catch (err) {
+    debug("read-failed", { repo, pr, what: "checks and base deploys", error: err });
+    return { text: `Could not read the checks: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  let facts = factsFrom(view, runs, now, required, rerunning, baseRuns, { noDeploy });
+  if (view.state === "OPEN" && view.headRefOid) {
+    const blocked = await tolerate(debug, "checks queued behind other runs", blockedChecks(gh, repo, view.headRefOid, cwd), [], { repo, pr });
+    if (blocked.length > 0) facts = { ...facts, blockedChecks: blocked };
+  }
+  if (view.state === "OPEN") {
+    const plans = await finishedRunPlans(gh, repo, view.statusCheckRollup, cwd);
+    if (plans.length > 0) facts = { ...facts, terraformPlans: plans };
+  }
+  if (facts.deploy === "RUNNING") {
+    const queued = runs.find((r) => r.event === "push" && r.status !== "completed" && r.status !== "in_progress" && r.jobs.length === 0) as (RunWithJobs & { workflowDatabaseId?: number }) | undefined;
+    const blockedBy = queued?.workflowDatabaseId !== undefined
+      ? await tolerate(debug, "blocking run", blockingRun(gh, repo, { databaseId: queued.databaseId, workflowDatabaseId: queued.workflowDatabaseId }, cwd), undefined, { repo, pr })
+      : undefined;
+    if (blockedBy) facts = factsFrom(view, runs, now, required, rerunning, baseRuns, { noDeploy, blockedBy });
+  }
+  if (facts.deploy === "FAILED" && view.mergeCommit) {
+    const failedRuns = listed.filter((r) => r.event === "push" && r.conclusion === "failure" && r.workflowDatabaseId !== undefined) as { workflowDatabaseId: number; createdAt: string }[];
+    const deployedBy = await tolerate(debug, "later deploy", laterDeploy(gh, repo, view.mergeCommit.oid, view.baseRefName, failedRuns, cwd), undefined, { repo, pr });
+    if (deployedBy) facts = factsFrom(view, runs, now, required, rerunning, baseRuns, { noDeploy, deployedBy });
+  }
+
+  // Only the PR's own pipeline is listed; everything else is counted, so the state stays short in large monorepos.
+  const runLines: string[] = [];
+  if (view.mergeCommit) {
+    runLines.push(`merged at ${view.mergedAt}, commit ${view.mergeCommit.oid}`, "merge pipeline:");
+    const mergedAt = Date.parse(view.mergedAt ?? "");
+    const unaffected = new Set(facts.unaffectedPipelines);
+    const own = runs.filter((r) => r.event === "push" && Date.parse(r.createdAt) >= mergedAt && !unaffected.has(r.workflowName));
+    if (own.length === 0) runLines.push(facts.deploy === "NOTHING" ? "  nothing to deploy for this change" : "  (none yet)");
+    for (const run of own) {
+      runLines.push(runLine(run), ...run.jobs.filter((j) => j.conclusion !== "skipped").map((j) => `      job ${j.name}: ${j.status} ${j.conclusion}`.trimEnd()));
+      if (run.conclusion === "failure") runLines.push(await failedLogTail(gh, repo, run.databaseId, cwd));
+    }
+    // Component pipelines that skipped their deploys are left out entirely: they change as each one decides, and every
+    // change in this text goes to the model, which then reported them despite being told not to.
+    const others = runs.filter((r) => !own.includes(r) && !unaffected.has(r.workflowName));
+    if (others.length > 0) {
+      const failed = others.filter((r) => r.conclusion === "failure").map((r) => `${r.workflowName} [${r.event}]`);
+      runLines.push(`${others.length} other runs on the merge commit (not this PR's deploy)${failed.length ? `, failed: ${failed.join(", ")}` : ""}`);
+    }
+  }
+
+  const checks = latestAttempts(pipelineChecks(view.statusCheckRollup));
+  const shown = checks.filter((c) => (c.conclusion ?? "").toUpperCase() !== "SKIPPED");
+  const lines = [
+    `PR: ${view.title} (${view.url})`,
+    summaryLine(facts, now),
+    `state: ${view.state}${view.isDraft ? " (draft)" : ""}`,
+    approvalLine(view.reviewDecision),
+    upToDateLine(view),
+    `merge: ${view.mergeStateStatus}${view.autoMergeRequest ? ", auto-merge enabled" : ""}`,
+    ...(view.state === "OPEN"
+      ? [
+          "checks:",
+          ...shown.map(checkLine).sort(),
+          ...facts.missingChecks.map((name) => `  - ${name}: required, not reported`),
+          ...(checks.length > shown.length ? [`  (${checks.length - shown.length} skipped)`] : []),
+        ]
+      : []),
+    ...(facts.deployingOnBase.length > 0 ? [`earlier merge still deploying on ${view.baseRefName}: ${facts.deployingOnBase.join(", ")}`] : []),
+    ...runLines,
+  ];
+  return { text: lines.join("\n"), facts };
+}
+
+async function jobsOf(gh: Gh, repo: string, runID: number, cwd: string): Promise<JobView[]> {
+  const { jobs }: { jobs: JobView[] } = JSON.parse(await gh(["run", "view", String(runID), "--repo", repo, "--json", "jobs"], cwd));
+  return jobs.map(({ name, status, conclusion, startedAt }) => ({ name, status, conclusion, startedAt }));
+}
+
+async function failedLogTail(gh: Gh, repo: string, runID: number, cwd: string): Promise<string> {
+  try {
+    const log = await gh(["run", "view", String(runID), "--repo", repo, "--log-failed"], cwd);
+    return logTail(log, 30).map((l) => `      ${l}`).join("\n");
+  } catch (err) {
+    debug("tolerated-error", { what: "failed log tail", repo, run: runID, error: err });
+    return "      (failed job log unavailable)";
+  }
+}
+
+export async function resolveRepo(gh: Gh, cwd: string): Promise<string> {
+  return (await gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], cwd)).trim();
+}
+
+export function parsePrReference(ref: string): { repo?: string; pr: number } | undefined {
+  const url = ref.match(/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/);
+  if (url) return { repo: url[1], pr: Number(url[2]) };
+  const short = ref.trim().match(/^(?:([\w.-]+\/[\w.-]+))?#?(\d+)$/);
+  if (!short) return undefined;
+  return short[1] ? { repo: short[1], pr: Number(short[2]) } : { pr: Number(short[2]) };
+}
+
+export async function currentBranchPrUrl(gh: Gh, cwd: string, repo?: string): Promise<string> {
+  const args = ["pr", "view", "--json", "url", "--jq", ".url", ...(repo ? ["--repo", repo] : [])];
+  return (await gh(args, cwd)).trim();
+}
+
+// Manual dispatches and schedules on a PR's commit are runs of their own, not the PR's checks or merge pipeline.
+const PR_EVENTS = new Set(["pull_request", "pull_request_target", "push"]);
+
+export async function prForRun(gh: Gh, repo: string, runID: string, cwd: string): Promise<number | undefined> {
+  const { headSha: sha, event }: { headSha: string; event: string } = JSON.parse(await gh(["run", "view", runID, "--repo", repo, "--json", "headSha,event"], cwd));
+  if (!PR_EVENTS.has(event)) return undefined;
+  const pr = (await gh(["api", `repos/${repo}/commits/${sha}/pulls`, "--jq", ".[0].number // empty"], cwd)).trim();
+  return pr ? Number(pr) : undefined;
+}
+
+async function runningWorkflows(gh: Gh, repo: string, sha: string | undefined, cwd: string): Promise<string[]> {
+  if (!sha) return [];
+  const runs: { workflowName: string; status: string }[] = JSON.parse(
+    await gh(["run", "list", "--repo", repo, "--commit", sha, "--json", "workflowName,status"], cwd),
+  );
+  return [...new Set(runs.filter((r) => r.status !== "completed").map((r) => r.workflowName))];
+}
+
+async function runningBaseDeploys(gh: Gh, repo: string, base: string, cwd: string): Promise<RunWithJobs[]> {
+  const listed: RunView[] = JSON.parse(
+    await gh(
+      ["run", "list", "--repo", repo, "--branch", base, "--event", "push", "--limit", "20", "--json", "databaseId,workflowName,status,conclusion,event,createdAt,url"],
+      cwd,
+    ),
+  );
+  const running = listed.filter((run) => run.status !== "completed");
+  return Promise.all(running.map(async (run) => ({ ...run, jobs: await jobsOf(gh, repo, run.databaseId, cwd) })));
+}
+
+/** The error lines of the PR's latest failed run: on the merge commit once merged, otherwise on the head commit. */
+export async function failureExcerpt(gh: Gh, repo: string, pr: number, cwd: string): Promise<string> {
+  const { headRefOid, mergeCommit } = JSON.parse(await gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid,mergeCommit"], cwd)) as {
+    headRefOid: string;
+    mergeCommit: { oid: string } | null;
+  };
+  const sha = mergeCommit?.oid ?? headRefOid;
+  const runs: { databaseId: number; conclusion: string; event: string }[] = JSON.parse(
+    await gh(["run", "list", "--repo", repo, "--commit", sha, "--json", "databaseId,conclusion,event"], cwd),
+  );
+  // Only the PR's own pipeline; other runs on the commit (Dependabot updates, schedules) aren't this failure.
+  const ownEvent = mergeCommit ? "push" : "pull_request";
+  const failed = runs.filter((r) => r.conclusion === "failure" && r.event === ownEvent).sort((a, b) => b.databaseId - a.databaseId)[0];
+  if (!failed) return "";
+  return runFailureExcerpt(gh, repo, failed.databaseId, cwd);
+}
+
+/** The failed jobs' steps and the end of the failed log of one run. */
+export async function runFailureExcerpt(gh: Gh, repo: string, runID: number, cwd: string): Promise<string> {
+  const steps = await failedJobSteps(gh, repo, runID, cwd);
+  const log = logTail(await gh(["run", "view", String(runID), "--repo", repo, "--log-failed"], cwd), 150).join("\n");
+  return [...steps, "", "End of the failed log:", log].join("\n");
+}
+
+export interface StandaloneRun extends RunWithJobs {
+  readonly headBranch: string;
+  readonly workflowDatabaseId: number;
+}
+
+export async function viewRun(gh: Gh, repo: string, runID: number, cwd: string): Promise<StandaloneRun> {
+  return JSON.parse(
+    await gh(["run", "view", String(runID), "--repo", repo, "--json", "databaseId,workflowName,workflowDatabaseId,event,headBranch,status,conclusion,createdAt,url,attempt,jobs"], cwd),
+  );
+}
+
+/** A workflow run without a PR, as text for the model and the listing plus its facts. */
+export async function runSnapshot(gh: Gh, repo: string, runID: number, cwd: string, now = Date.now()): Promise<Snapshot> {
+  let run: StandaloneRun;
+  try {
+    run = await viewRun(gh, repo, runID, cwd);
+  } catch (err) {
+    debug("read-failed", { repo, run: runID, what: "run", error: err });
+    return { text: `Could not read the run: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const facts = runFacts(run);
+  const lines = [
+    `Run: ${run.workflowName} on ${run.headBranch} (${run.url})`,
+    summaryLine(facts, now),
+    `started ${run.createdAt} by ${run.event}, attempt ${run.attempt ?? 1}`,
+    runLine(run),
+    ...run.jobs.filter((j) => j.conclusion !== "skipped").map((j) => `      job ${j.name}: ${j.status} ${j.conclusion}`.trimEnd()),
+  ];
+  if (facts.deploy === "FAILED") lines.push(await failedLogTail(gh, repo, run.databaseId, cwd));
+  return { text: lines.join("\n"), facts };
+}
+
+// The steps of each failed job, in order: lets the model see whether the steps that ship the service succeeded before
+// a later one failed.
+async function failedJobSteps(gh: Gh, repo: string, runID: number, cwd: string): Promise<string[]> {
+  try {
+    const { jobs }: { jobs: { name: string; conclusion: string; steps?: { name: string; conclusion: string }[] }[] } = JSON.parse(
+      await gh(["run", "view", String(runID), "--repo", repo, "--json", "jobs"], cwd),
+    );
+    return jobs
+      .filter((job) => job.conclusion === "failure")
+      .flatMap((job) => [`Steps of failed job ${job.name}:`, ...(job.steps ?? []).map((step) => `  ${step.name}: ${step.conclusion}`)]);
+  } catch (err) {
+    debug("tolerated-error", { what: "failed job steps", repo, run: runID, error: err });
+    return [];
+  }
+}
+
+interface PipelineRun {
+  readonly databaseId: number;
+  readonly workflowName: string;
+  readonly workflowDatabaseId: number;
+}
+
+/** The PR's own runs still in progress: on the merge commit once merged (push), otherwise on the head commit. */
+export async function runningPipelines(gh: Gh, repo: string, pr: number, cwd: string): Promise<{ event: string; runs: PipelineRun[] }> {
+  const { headRefOid, mergeCommit } = JSON.parse(await gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid,mergeCommit"], cwd)) as {
+    headRefOid: string;
+    mergeCommit: { oid: string } | null;
+  };
+  const event = mergeCommit ? "push" : "pull_request";
+  const runs: (PipelineRun & { status: string; event: string })[] = JSON.parse(
+    await gh(["run", "list", "--repo", repo, "--commit", mergeCommit?.oid ?? headRefOid, "--json", "databaseId,workflowName,workflowDatabaseId,status,event"], cwd),
+  );
+  return { event, runs: runs.filter((r) => r.event === event && r.status !== "completed") };
+}
+
+/** Durations of the workflow's recent successful runs. */
+export async function workflowDurations(gh: Gh, repo: string, workflow: number, event: string, cwd: string): Promise<number[]> {
+  const runs: { createdAt: string; updatedAt: string }[] = JSON.parse(
+    await gh(
+      ["run", "list", "--repo", repo, "--workflow", String(workflow), "--event", event, "--status", "success", "--limit", "20", "--json", "createdAt,updatedAt"],
+      cwd,
+    ),
+  );
+  return runs.map((r) => Date.parse(r.updatedAt) - Date.parse(r.createdAt)).filter((d) => d > 0);
+}
+
+/** Which jobs and steps of a run are running, and for how long, for the stall check. */
+export async function runProgress(gh: Gh, repo: string, runID: number, cwd: string, now = Date.now()): Promise<string> {
+  const { workflowName, jobs } = JSON.parse(await gh(["run", "view", String(runID), "--repo", repo, "--json", "workflowName,jobs"], cwd)) as {
+    workflowName: string;
+    jobs: { name: string; status: string; conclusion: string; startedAt: string; steps: { name: string; status: string; conclusion: string }[] }[];
+  };
+  const minutes = (since: string) => Math.round((now - Date.parse(since)) / 60_000);
+  const lines = jobs
+    .filter((job) => job.status !== "completed")
+    .map((job) => {
+      const step = job.steps.find((s) => s.status === "in_progress");
+      const done = job.steps.filter((s) => s.status === "completed").length;
+      return `  job ${job.name}: ${job.status} for ${minutes(job.startedAt)} min; ${done}/${job.steps.length} steps done${step ? `; running "${step.name}"` : ""}`;
+    });
+  return [`${workflowName}:`, ...lines].join("\n");
+}
+
+// GitHub lists a job only once it is about to run, so a building pipeline doesn't show its deploy jobs yet. Its last
+// successful merge run tells whether it deploys. Cached per process: a workflow's shape rarely changes.
+const deploysCache = new Map<string, boolean>();
+
+async function workflowUsuallyDeploys(gh: Gh, repo: string, workflow: number, cwd: string): Promise<boolean> {
+  const key = `${repo}/${workflow}`;
+  const cached = deploysCache.get(key);
+  if (cached !== undefined) return cached;
+  const last: { databaseId: number }[] = JSON.parse(
+    await gh(["run", "list", "--repo", repo, "--workflow", String(workflow), "--event", "push", "--status", "success", "--limit", "1", "--json", "databaseId"], cwd),
+  );
+  const deploys = last[0] ? (await jobsOf(gh, repo, last[0].databaseId, cwd)).some(isDeployJob) : false;
+  deploysCache.set(key, deploys);
+  return deploys;
+}
+
+/** What the model needs to judge a workflow: its name, file path, job names from its latest run, and the file itself. */
+export async function workflowSummary(gh: Gh, repo: string, workflowID: number, cwd: string): Promise<WorkflowSummary> {
+  const { name, path } = JSON.parse(await gh(["api", `repos/${repo}/actions/workflows/${workflowID}`], cwd)) as { name: string; path: string };
+  // GitHub's default setups (path "dynamic/...") have no file in the repo.
+  const file = path.startsWith(".github/")
+    ? await tolerate(debug, "workflow file", gh(["api", `repos/${repo}/contents/${path}`, "-H", "Accept: application/vnd.github.raw"], cwd), "", { repo, path })
+    : "";
+  const [latest] = JSON.parse(await gh(["run", "list", "--repo", repo, "--workflow", String(workflowID), "--limit", "1", "--json", "databaseId"], cwd)) as {
+    databaseId: number;
+  }[];
+  const jobs = latest ? (await jobsOf(gh, repo, latest.databaseId, cwd)).map((job) => job.name) : [];
+  return { name, path, jobs, file };
+}
+
+/**
+ * A later successful run of a failed pipeline, on a commit that contains the merge, deployed this change too (a
+ * rollout that timed out, then the next merge's run went through). Only runs whose deploy jobs actually ran count.
+ */
+export async function laterDeploy(
+  gh: Gh,
+  repo: string,
+  mergeSha: string,
+  base: string,
+  failed: readonly { workflowDatabaseId: number; createdAt: string }[],
+  cwd: string,
+): Promise<{ title: string; url: string } | undefined> {
+  for (const run of failed) {
+    const later: { databaseId: number; headSha: string; createdAt: string; url: string; displayTitle: string }[] = JSON.parse(
+      await gh(
+        ["run", "list", "--repo", repo, "--workflow", String(run.workflowDatabaseId), "--branch", base, "--event", "push", "--status", "success", "--created", `${run.createdAt.slice(0, 10)}..${new Date(Date.parse(run.createdAt) + 7 * 86_400_000).toISOString().slice(0, 10)}`, "--limit", "100", "--json", "databaseId,headSha,createdAt,url,displayTitle"],
+        cwd,
+      ),
+    );
+    // The earliest one is the run that actually deployed the change.
+    for (const candidate of later.filter((r) => Date.parse(r.createdAt) > Date.parse(run.createdAt)).sort((a, b) => a.databaseId - b.databaseId)) {
+      const { jobs }: { jobs: { name: string; conclusion: string }[] } = JSON.parse(await gh(["run", "view", String(candidate.databaseId), "--repo", repo, "--json", "jobs"], cwd));
+      if (!jobs.some((job) => isDeployJob(job as JobView) && job.conclusion === "success")) continue;
+      const status = (await gh(["api", `repos/${repo}/compare/${mergeSha}...${candidate.headSha}`, "--jq", ".status"], cwd)).trim();
+      if (status === "ahead" || status === "identical") return { title: candidate.displayTitle, url: candidate.url };
+    }
+  }
+  return undefined;
+}
+
+/** The oldest run of the workflow, older than the queued one, waiting for an environment approval. */
+export async function blockingRun(gh: Gh, repo: string, queued: { databaseId: number; workflowDatabaseId: number }, cwd: string): Promise<PrFacts["blockedBy"]> {
+  const waiting: { databaseId: number; createdAt: string; url: string; displayTitle: string }[] = JSON.parse(
+    await gh(["run", "list", "--repo", repo, "--workflow", String(queued.workflowDatabaseId), "--status", "waiting", "--limit", "20", "--json", "databaseId,createdAt,url,displayTitle"], cwd),
+  );
+  const oldest = waiting.filter((run) => run.databaseId < queued.databaseId).sort((a, b) => a.databaseId - b.databaseId)[0];
+  return oldest ? { title: oldest.displayTitle, url: oldest.url, since: Date.parse(oldest.createdAt) } : undefined;
+}
+
+// A finished job's log never changes; a rerun gets new job ids.
+const planCache = new Map<string, string | null>();
+
+/** Terraform plan summaries from the PR's finished jobs; each job's log is read once. */
+export async function finishedRunPlans(gh: Gh, repo: string, rollup: readonly CheckView[], cwd: string): Promise<TerraformPlan[]> {
+  const plans: TerraformPlan[] = [];
+  for (const check of pipelineChecks(rollup)) {
+    const job = check.detailsUrl?.match(/\/actions\/runs\/\d+\/job\/(\d+)/)?.[1];
+    if (!job || (check.status ?? "").toUpperCase() !== "COMPLETED") continue;
+    const key = `${repo}:${job}`;
+    if (!planCache.has(key)) {
+      let log: string | undefined;
+      try {
+        log = await gh(["api", "--allow-escape-sequences", `repos/${repo}/actions/jobs/${job}/logs`], cwd);
+      } catch (err) {
+        debug("tolerated-error", { what: "job log for the plan summary", repo, job, error: err });
+        // A deleted (410) or missing (404) log stays that way; asking again on every check won't bring it back.
+        if (/HTTP 4(04|10)/.test(err instanceof Error ? err.message : String(err))) planCache.set(key, null);
+        continue;
+      }
+      planCache.set(key, planSummary(log) ?? null);
+    }
+    const summary = planCache.get(key);
+    if (summary) plans.push({ job: checkName(check), summary });
+  }
+  return plans;
+}
+
+const MY_PR_FIELDS = "repository,number,title,url,isDraft,createdAt,closedAt";
+
+/** Open PRs the gh user created, in every repo. */
+export async function myOpenPrs(gh: Gh, cwd: string): Promise<MyPr[]> {
+  const raw: SearchedPr[] = JSON.parse(await gh(["search", "prs", "--author", "@me", "--state", "open", "--limit", "200", "--json", MY_PR_FIELDS], cwd));
+  return raw.map(myPrFrom);
+}
+
+/** PRs the gh user created that merged on or after the given day (YYYY-MM-DD). */
+export async function myMergedPrs(gh: Gh, since: string, cwd: string): Promise<MyPr[]> {
+  const raw: SearchedPr[] = JSON.parse(
+    await gh(["search", "prs", "--author", "@me", "--merged", "--merged-at", `>=${since}`, "--limit", "200", "--json", MY_PR_FIELDS], cwd),
+  );
+  return raw.map(myPrFrom);
+}
+
+/**
+ * The PR's check runs that are queued with no jobs behind an older run of their workflow waiting for run approval
+ * (one run per workflow at a time), with the run ahead of each.
+ */
+export async function blockedChecks(gh: Gh, repo: string, headSha: string, cwd: string): Promise<NonNullable<PrFacts["blockedChecks"]>> {
+  const runs: { databaseId: number; workflowName: string; workflowDatabaseId: number; status: string }[] = JSON.parse(
+    await gh(["run", "list", "--repo", repo, "--commit", headSha, "--json", "databaseId,workflowName,workflowDatabaseId,status,event"], cwd),
+  );
+  const queued = runs.filter((run) => ["pending", "queued", "requested"].includes(run.status));
+  const blocked = await Promise.all(
+    queued.map(async (run) => {
+      if ((await jobsOf(gh, repo, run.databaseId, cwd)).length > 0) return undefined;
+      const ahead = await blockingRun(gh, repo, { databaseId: run.databaseId, workflowDatabaseId: run.workflowDatabaseId }, cwd);
+      return ahead ? { workflow: run.workflowName, ...ahead } : undefined;
+    }),
+  );
+  return blocked.filter((b): b is NonNullable<typeof b> => b !== undefined);
+}
