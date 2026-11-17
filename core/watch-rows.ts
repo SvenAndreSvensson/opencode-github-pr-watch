@@ -68,6 +68,23 @@ const runText = (run: AttachedRun) =>
 // Bot titles ("bump … from <sha> to <sha>") would fill the row; the message keeps them whole.
 const short = (text: string) => (text.length > 60 ? `${text.slice(0, 59)}…` : text);
 
+/** Where the PR is, as the row says it ("waiting for code review", "checks running 3/5 · Build"). */
+export function stepDetail(facts: PrFacts, now: number): string {
+  const step = nextStep(facts, now);
+  return ((facts.standaloneRun && RUN_STEPS[step]) || STEPS[step]).detail(facts);
+}
+
+const CHECKS_GOING = new Set<Step>(["WAIT_CHECKS", "CHECKS_WAITING", "CHECKS_BLOCKED"]);
+const APPROVAL_WAITS = new Set<Step>(["CHECKS_WAITING", "DEPLOY_WAITING"]);
+
+/** A change of step, said as a fact: "checks passed; now waiting for code review", or "now <where it is>". */
+export function stepChangeText(before: PrFacts, after: PrFacts, now: number): string {
+  const was = nextStep(before, now);
+  const passed = CHECKS_GOING.has(was) && after.checks === "PASS";
+  const approved = APPROVAL_WAITS.has(was) && !APPROVAL_WAITS.has(nextStep(after, now)) && after.checks !== "FAIL" && after.deploy !== "FAILED";
+  return `${passed ? "checks passed; " : approved ? "run approval given; " : ""}now ${stepDetail(after, now)}`;
+}
+
 const titleOf = (watch: Watch) =>
   watch.lastSnapshot?.split("\n")[0]?.replace(/^(PR|Run): /, "").replace(/ \(https:\/\/\S+\)$/, "");
 

@@ -214,6 +214,7 @@ describe("tick: waiting", () => {
 
     expect(ports.notifications.map((n) => n.text)).toEqual([
       expect.stringContaining("run approval needed (checks): CORE / Plan"),
+      expect.stringContaining("run approval given; now checks running"),
       expect.stringContaining("run approval needed (checks): PROD / Plan"),
     ]);
   });
@@ -653,5 +654,32 @@ describe("a watch taken over by another folder's plugin instance (orphan takeove
     expect(result.stop).toBe(false);
     expect(ports.judged).toEqual([]);
     expect(ports.notifications).toEqual([]);
+  });
+});
+
+describe("notify: every step change by rule (major), progress too (all) — acme/admin#41", () => {
+  const running = { checks: "PENDING" as const, review: "REVIEW_REQUIRED" as const, checksProgress: { done: 3, total: 5, current: "Scan" } };
+  const passed = { checks: "PASS" as const, review: "REVIEW_REQUIRED" as const };
+
+  test("checks that finish and pass are reported, without asking the model", async () => {
+    const ports = fakePorts({ snapshots: [aSnapshot("all passed", passed)] });
+    const result = await tick(watchStarted({ lastSnapshot: "running", lastFacts: aFacts(running) }), ports, settings());
+    expect(result.stop).toBe(false);
+    expect(ports.notifications[0]!.text).toContain("checks passed; now waiting for code review");
+    expect(ports.judged).toEqual([]);
+  });
+
+  test("progress within a step is left to the model by default", async () => {
+    const ports = fakePorts({ snapshots: [aSnapshot("4 of 5", { ...running, checksProgress: { done: 4, total: 5, current: "Build" } })], verdicts: ['{"verdict":"wait"}'] });
+    await tick(watchStarted({ lastSnapshot: "3 of 5", lastFacts: aFacts(running) }), ports, settings());
+    expect(ports.notifications).toEqual([]);
+    expect(ports.judged).toHaveLength(1);
+  });
+
+  test("with notify all, progress within a step is reported too", async () => {
+    const ports = fakePorts({ snapshots: [aSnapshot("4 of 5", { ...running, checksProgress: { done: 4, total: 5, current: "Build" } })] });
+    await tick(watchStarted({ lastSnapshot: "3 of 5", lastFacts: aFacts(running), notify: "all" }), ports, settings());
+    expect(ports.notifications[0]!.text).toContain("checks running 4/5 · Build");
+    expect(ports.judged).toEqual([]);
   });
 });

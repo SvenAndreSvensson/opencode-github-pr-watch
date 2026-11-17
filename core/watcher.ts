@@ -1,5 +1,6 @@
 import { answerShape } from "./answer";
 import { noDebugLog, tolerate, type DebugLog } from "./debug-log";
+import { stepChangeText, stepDetail } from "./watch-rows";
 import { keptRuns } from "./attached-runs";
 import { PROGRESSING, type PhaseLimit } from "./timing";
 import { failureSignature, needsBotAdvice, suggestionFor, type Diagnosis } from "./advice";
@@ -49,6 +50,8 @@ export interface Watch {
   readonly judgeFailureReported?: boolean;
   /** When the PR was first seen ready for merge; it is only said once a second check agrees. */
   readonly readySince?: number;
+  /** "all" also reports progress within a step (each check or job); the default reports each change of step. */
+  readonly notify?: "major" | "all";
 }
 
 /** The PR as text for the model and the listing, plus structured facts when the PR could be read. */
@@ -294,6 +297,13 @@ async function tickInner(watch: Watch, ports: WatchPorts, settings: WatchSetting
     const suggestion = advice ? ` suggestion${advice.fromPr ? " (read from the bot's PR description, verify before acting)" : ""}: ${advice.text}.` : "";
     await say(`${what}watch stopped: ${stated}${author}.${suggestion} ${summary}`);
     return { watch: next, stop: true, delayMs: 0 };
+  }
+  // Every change of where the PR is gets said by rule, so the end of something announced (checks restarted) is never
+  // left to the model, which may call it routine. With notify "all", progress within a step is said too.
+  // The commit a branch update creates, and the checks it restarts, are the caller's own doing.
+  if (found.length === 0 && watch.lastFacts && !expectedCommitArrived) {
+    if (nextStep(watch.lastFacts, now) !== nextStep(facts, now)) found.push(stepChangeText(watch.lastFacts, facts, now));
+    else if (watch.notify === "all" && stepDetail(watch.lastFacts, now) !== stepDetail(facts, now)) found.push(stepDetail(facts, now));
   }
   if (found.length > 0) await say(`${found.join("; ")}. ${summary}`);
   if (reminderDue(facts, phaseSince, watch.lastReminderAt, now)) {
