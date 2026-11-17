@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createSignal, For, Index, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { createStore } from "solid-js/store";
 import { ComposerPill, createKeyed, Panel, Plugin, Style, type ComposerPillTone, type IconName } from "@opencode/plugin/gui";
 import { PRS_TAB } from "../core/panel-tab";
@@ -169,7 +169,8 @@ export default Plugin.define({
       return match ? { repo: match[1]!, number: Number(match[2]), title: row.label.slice(row.id.length + 1), url: row.url } : undefined;
     };
     const WatchLine = (props: { readonly row: Row; readonly session: PanelSession; readonly onError: (text: string) => void }): JSX.Element => {
-      const pr = prOfRow(props.row);
+      // Read live: rows are reused by position when the list reloads.
+      const pr = () => prOfRow(props.row);
       return (
         <PrLineView
           text={props.row.label}
@@ -177,9 +178,11 @@ export default Plugin.define({
           url={props.row.url}
           row={props.row}
           onStop={() => stopWatching(props.row.id)}
-          {...(pr
-            ? { onNewSession: () => void startPrSession(props.session, pr).catch((err: unknown) => props.onError(`Could not start a session: ${err instanceof Error ? err.message : String(err)}`)) }
-            : {})}
+          onNewSession={
+            pr()
+              ? () => void startPrSession(props.session, pr()!).catch((err: unknown) => props.onError(`Could not start a session: ${err instanceof Error ? err.message : String(err)}`))
+              : undefined
+          }
         />
       );
     };
@@ -329,9 +332,10 @@ export default Plugin.define({
       };
 
       const PrLine = (line: { readonly pr: MyPr; readonly merged: boolean }): JSX.Element => {
-        const id = `${line.pr.repo}#${line.pr.number}`;
+        // Read live: rows are reused by position when the list reloads, so a line can show another PR next time.
+        const id = () => `${line.pr.repo}#${line.pr.number}`;
         // The watch's own row, from whichever session watches the PR: its status, icon and run links.
-        const row = () => data()?.watchedRows?.find((r) => r.id === id);
+        const row = () => data()?.watchedRows?.find((r) => r.id === id());
         // Watched PRs that aren't mine come from the watch, without an opening date.
         const age_ = () =>
           line.merged && line.pr.closedAt
@@ -349,9 +353,10 @@ export default Plugin.define({
             }
             detail={[row()?.detail, age_()].filter(Boolean).join(" · ")}
             url={line.pr.url}
-            {...(row() ? { row: row()! } : {})}
-            {...(row() ? { onStop: () => stopWatching(id) } : line.merged ? {} : { onWatch: () => watch(line.pr) })}
-            {...(row()?.sessionID ? { onOpenSession: openSession(row()!) } : {})}
+            row={row()}
+            onStop={row() ? () => stopWatching(id()) : undefined}
+            onWatch={!row() && !line.merged ? () => watch(line.pr) : undefined}
+            onOpenSession={row()?.sessionID ? openSession(row()!) : undefined}
             onNewSession={() =>
               void track(`Starting a session about ${line.pr.repo}#${line.pr.number}…`, startPrSession(props.session, line.pr)).catch(failed("Could not start a session"))
             }
@@ -373,42 +378,42 @@ export default Plugin.define({
             ? byTopic(prs, topics()!, organisation() || undefined, effectiveSort(), drafts()).map((g) => ({ ...g, kind: "topic" as const }))
             : shown(prs).map((g) => ({ name: g.repo, prs: g.prs, kind: "repo" as const }));
       const Groups = (groups: { readonly prs: readonly MyPr[]; readonly merged: boolean }): JSX.Element => (
-        <For each={grouped(searched(groups.prs))}>
+        <Index each={grouped(searched(groups.prs))}>
           {(group, index) => {
-            const slash = group.kind === "repo" ? group.name.indexOf("/") : -1;
+            const slash = () => (group().kind === "repo" ? group().name.indexOf("/") : -1);
             return (
               <section
                 style={{
                   display: "flex", "flex-direction": "column", gap: "6px",
-                  ...(index() > 0 ? { "border-top": "1px solid rgba(127,127,127,0.2)", "padding-top": "12px" } : {}),
+                  ...(index > 0 ? { "border-top": "1px solid rgba(127,127,127,0.2)", "padding-top": "12px" } : {}),
                 }}
               >
                 <div style={{ display: "flex", "align-items": "center", gap: "6px", "min-width": "0" }}>
-                  <ctx.ui.Icon name={group.kind === "repo" ? "folder" : group.kind === "topic" ? "bullet-list" : "checklist"} size="small" />
+                  <ctx.ui.Icon name={group().kind === "repo" ? "folder" : group().kind === "topic" ? "bullet-list" : "checklist"} size="small" />
                   <div style={{ flex: "1", "min-width": "0", "overflow-wrap": "anywhere" }}>
-                    <span style={{ opacity: "0.6" }}>{group.name.slice(0, slash + 1)}</span>
-                    <span style={{ "font-weight": "600" }}>{group.name.slice(slash + 1)}</span>
+                    <span style={{ opacity: "0.6" }}>{group().name.slice(0, slash() + 1)}</span>
+                    <span style={{ "font-weight": "600" }}>{group().name.slice(slash() + 1)}</span>
                   </div>
-                  <span style={{ opacity: "0.6", "font-size": "12px" }}>{group.prs.length}</span>
+                  <span style={{ opacity: "0.6", "font-size": "12px" }}>{group().prs.length}</span>
                   <ctx.ui.IconButton
                     icon="copy"
-                    label={`Copy these ${group.prs.length} PRs as a list`}
+                    label={`Copy these ${group().prs.length} PRs as a list`}
                     size="small"
                     onClick={() =>
                       void ctx.system
-                        .copy(prList(group.prs))
-                        .then(() => say(`Copied ${group.prs.length} PR${group.prs.length === 1 ? "" : "s"} from ${group.name}.`))
+                        .copy(prList(group().prs))
+                        .then(() => say(`Copied ${group().prs.length} PR${group().prs.length === 1 ? "" : "s"} from ${group().name}.`))
                         .catch(failed("Could not copy"))
                     }
                   />
                 </div>
                 <div style={{ display: "flex", "flex-direction": "column", gap: "6px", "padding-left": "22px" }}>
-                  <For each={group.prs}>{(pr) => <PrLine pr={pr} merged={groups.merged} />}</For>
+                  <Index each={group().prs}>{(pr) => <PrLine pr={pr()} merged={groups.merged} />}</Index>
                 </div>
               </section>
             );
           }}
-        </For>
+        </Index>
       );
 
       return (
@@ -493,18 +498,18 @@ export default Plugin.define({
                       <span style={{ opacity: "0.6", "font-size": "12px" }}>{runs().length}</span>
                     </div>
                     <div style={{ display: "flex", "flex-direction": "column", gap: "6px", "padding-left": "22px" }}>
-                      <For each={runs()}>
+                      <Index each={runs()}>
                         {(row) => (
                           <PrLineView
-                            text={row.label}
-                            detail={row.detail}
-                            url={row.url}
-                            row={row}
-                            onStop={() => stopWatching(row.id)}
-                            {...(row.sessionID ? { onOpenSession: openSession(row) } : {})}
+                            text={row().label}
+                            detail={row().detail}
+                            url={row().url}
+                            row={row()}
+                            onStop={() => stopWatching(row().id)}
+                            onOpenSession={row().sessionID ? openSession(row()) : undefined}
                           />
                         )}
-                      </For>
+                      </Index>
                     </div>
                   </section>
                 </Show>
@@ -572,7 +577,7 @@ export default Plugin.define({
       // One line per PR: where it is, with buttons that open the PR and the run it's waiting on in the browser.
       menu: (input) => (
         <div style={{ display: "flex", "flex-direction": "column", gap: "6px", padding: "4px 0", width: "100%", "box-sizing": "border-box", "max-height": "min(480px, 60vh)", "overflow-y": "auto", "padding-right": "4px" }}>
-          <For each={watches[input.session.id] ?? []}>{(row) => <WatchLine row={row} session={input.session} onError={() => undefined} />}</For>
+          <Index each={watches[input.session.id] ?? []}>{(row) => <WatchLine row={row()} session={input.session} onError={() => undefined} />}</Index>
         </div>
       ),
     });
