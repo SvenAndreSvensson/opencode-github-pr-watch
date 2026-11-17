@@ -24,7 +24,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { notificationCommands } from "./core/desktop-notification";
 import { messageKey, shouldSend } from "./core/dedupe";
-import { resumedMessage, watchStartedMessage } from "./core/messages";
+import { resumedMessage, startFailed, startingMessage, startResult, watchStartedMessage } from "./core/messages";
 import { pinProvider, resolveJudgeModel, type ModelRef, type SessionView } from "./core/model-guard";
 import { awaitTrigger, tick, type Snapshot, type Watch, type WatchPorts, type WatchSettings } from "./core/watcher";
 import { summaryLine, type PrFacts, setBookkeepingJobs } from "./core/pr-facts";
@@ -383,8 +383,10 @@ export default Plugin.define({
       await inform(sessionID, text);
     };
 
-    const inform = async (sessionID: string, text: string) => {
-      await ctx.session.synthetic({ sessionID, text: `[pr-watch] ${text}`, delivery: "queue", resume: false });
+    const inform = async (sessionID: string, text: string) => deliver(sessionID, text, false);
+    // Waking the agent (resume) is for what it has to act on.
+    const deliver = async (sessionID: string, text: string, wake: boolean) => {
+      await ctx.session.synthetic({ sessionID, text: `[pr-watch] ${text}`, delivery: "queue", resume: wake });
     };
 
     // One poll loop per directory and process: this instance takes it over from any earlier instance.
@@ -623,6 +625,22 @@ export default Plugin.define({
     const startWatch = async (sessionID: string, prReference: string, cwd?: string, batchID?: string, trigger?: Trigger, startedBy?: string, notify?: Notify): Promise<string> =>
       (await startOne(sessionID, prReference, cwd, batchID, trigger, startedBy, notify)).message;
 
+    // The provider guard and the judging model for a session's watches; throws when watching would break the guard.
+    const guarded = async (sessionID: string) => {
+      const session = await sessionView(sessionID);
+      const pin = pinProvider(session, directory);
+      if (!pin.ok) throw new Error(`Refusing to watch: ${pin.reason}. No model will be called for this watch.`);
+      const judge = resolveJudgeModel({
+        pinned: pin.pinned,
+        session,
+        pluginDirectory: directory,
+        catalog: await ports.catalog(),
+        preferences: settings.preferences,
+      });
+      if (!judge.ok) throw new Error(`Refusing to watch: ${judge.reason}. No model will be called for this watch.`);
+      return { session, pin, judge };
+    };
+
     const startOne = async (
       sessionID: string,
       prReference: string,
@@ -638,17 +656,7 @@ export default Plugin.define({
       const ref = runRef ? { repo: runRef.repo, pr: 0 } : parsePrReference(prReference);
       if (!ref) throw new Error(`Not a PR or run reference: ${prReference}`);
 
-      const session = await sessionView(sessionID);
-      const pin = pinProvider(session, directory);
-      if (!pin.ok) throw new Error(`Refusing to watch: ${pin.reason}. No model will be called for this watch.`);
-      const judge = resolveJudgeModel({
-        pinned: pin.pinned,
-        session,
-        pluginDirectory: directory,
-        catalog: await ports.catalog(),
-        preferences: settings.preferences,
-      });
-      if (!judge.ok) throw new Error(`Refusing to watch: ${judge.reason}. No model will be called for this watch.`);
+      const { session, pin, judge } = await guarded(sessionID);
 
       const repo = ref.repo ?? (await resolveRepo(runGh, cwd ?? session.directory));
       const automatic = startedBy !== undefined;
@@ -894,7 +902,8 @@ export default Plugin.define({
           "Every change of where the PR is gets a message, including checks finishing (passed or failed), so no message means nothing changed; " +
           'notify "all" also reports progress within a step (each check or job). ' +
           "Also watches a single workflow run without a PR (a manual dispatch), given its run link, until it succeeds, fails or waits for approval. " +
-          "Starts automatically after gh pr merge, gh pr update-branch, gh run rerun and gh workflow run. Use this instead of polling with sleep.",
+          "Starts automatically after gh pr merge, gh pr update-branch, gh run rerun and gh workflow run. Use this instead of polling with sleep. " +
+          "Answers at once; the first status (or why it isn't watched) follows as a message within about 15 seconds, so don't wait or poll for it.",
         input: {
           type: "object",
           properties: {
@@ -924,7 +933,19 @@ export default Plugin.define({
         },
         async execute(rawInput, context) {
           const input = rawInput as { pr: string; deployWorkflow?: string; notify?: Notify };
-          return { content: await startMany(context.sessionID, input.pr, input.deployWorkflow, input.notify) };
+          // What fails at once (no references, the provider guard) is the answer; the first check, which takes
+          // 10-15 seconds of gh calls, runs in the background and its result comes as a message.
+          if (parsePrReferences(input.pr).refs.length === 0 && !input.pr.split(/[\s,]+/).some((token) => parseRunReference(token))) {
+            throw new Error(`No PR references in: ${input.pr}`);
+          }
+          await guarded(context.sessionID);
+          const sessionID = context.sessionID;
+          void (async () => {
+            const result = await startMany(sessionID, input.pr, input.deployWorkflow, input.notify).then(startResult, (err: unknown) => startFailed(input.pr, err));
+            debug("start-reported", { sessionID, pr: input.pr, wake: result?.wake ?? false });
+            if (result) await deliver(sessionID, result.text, result.wake);
+          })().catch((err: unknown) => debug("start-report-failed", { sessionID, pr: input.pr, error: err }));
+          return { content: startingMessage(input.pr.trim()) };
         },
       });
 

@@ -4,7 +4,7 @@ What the watch reads, what it reports and when, and how it decides. See the [REA
 
 ## Tools in detail
 
-- `watch_pr` — start watching one or more PRs (`123`, `owner/repo#123` or a PR URL, separated by spaces, commas or newlines). PRs started together form a batch. `notify: "all"` also reports progress within a step (see below).
+- `watch_pr` — start watching one or more PRs (`123`, `owner/repo#123` or a PR URL, separated by spaces, commas or newlines). PRs started together form a batch. `notify: "all"` also reports progress within a step (see below). It answers at once: references and the provider guard are checked right away, and the first check (10–15 seconds of `gh` calls) runs in the background. Its result follows as a message; a refusal or error wakes the agent, a started watch only informs.
 - `unwatch_pr` — stop watching
 - `list_pr_watches` — show watched PRs, their last state, and when it was last checked and last changed. The state is from the last poll, not live. A watch not checked for more than twice its poll interval is marked `STALE: last checked N min ago`. Each state starts with whether the PR is approved and whether it is up to date with its base branch. `tail: N` shows only the last N lines of each state (where the deploy jobs are), plus the PR title, approval and up-to-date lines. Lists this session's watches; `allSessions: true` lists every session's.
 

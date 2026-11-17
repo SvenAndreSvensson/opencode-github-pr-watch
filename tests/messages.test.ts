@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { resumedMessage, watchStartedMessage } from "../core/messages";
+import { resumedMessage, startFailed, startingMessage, startResult, watchStartedMessage } from "../core/messages";
 
 describe("watchStartedMessage", () => {
   test("names the provider and the model that will judge changes", () => {
@@ -42,5 +42,22 @@ describe("watchStartedMessage: what will be reported (acme/admin#41)", () => {
 
   test("all: progress within a step too", () => {
     expect(watchStartedMessage("o/r#1", model, undefined, undefined, "all")).toContain("progress within a step (each check or job) is reported too");
+  });
+});
+
+describe("background starts: watch_pr answers at once, the result comes as a message", () => {
+  test("the immediate answer says the status follows", () => {
+    expect(startingMessage("o/r#7")).toBe("Starting to watch o/r#7; its status follows in a message within about 15 seconds.");
+  });
+
+  test("watches that started only inform; a refusal or error wakes the agent, which has to act on it", () => {
+    expect(startResult("Watching o/r#7. summary: x.")).toEqual({ text: "Watching o/r#7. summary: x.", wake: false });
+    expect(startResult("Not watching o/r#7: closed. summary: x.")).toEqual({ text: "Not watching o/r#7: closed. summary: x.", wake: true });
+    expect(startResult("Watching o/r#1.\nNot a PR reference: foo")).toEqual({ text: "Watching o/r#1.\nNot a PR reference: foo", wake: true });
+    expect(startResult("")).toBeUndefined();
+  });
+
+  test("a failed start says what failed", () => {
+    expect(startFailed("o/r#7", new Error("HTTP 502"))).toEqual({ text: "Could not start watching o/r#7: HTTP 502", wake: true });
   });
 });
