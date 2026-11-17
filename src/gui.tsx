@@ -257,13 +257,25 @@ export default Plugin.define({
       const choose = <K extends keyof PrsChoices>(key: K, value: PrsChoices[K]) => chooseFor(props.session.id, key, value);
       const view = () => prsView(data() ?? { open: [], watchedRows: [] }, choices(), props.session.id, topics());
       const openSession = (row: Row) => () => port.openSession(props.session.server.id, row.sessionID!);
+      let statusMenu: HTMLDetailsElement | undefined;
       onMount(() => {
         load();
         const stop = ctx.client.rpc(PrWatch).events.on("changed", () => load());
         const timer = setInterval(load, 3 * 60_000);
+        // The status dropdown is a <details>, which only closes on its own button: a click outside or Escape closes it too.
+        const closeOutside = (event: PointerEvent) => {
+          if (statusMenu?.open && !statusMenu.contains(event.target as Node)) statusMenu.open = false;
+        };
+        const closeOnEscape = (event: KeyboardEvent) => {
+          if (event.key === "Escape" && statusMenu?.open) statusMenu.open = false;
+        };
+        document.addEventListener("pointerdown", closeOutside);
+        document.addEventListener("keydown", closeOnEscape);
         onCleanup(() => {
           stop();
           clearInterval(timer);
+          document.removeEventListener("pointerdown", closeOutside);
+          document.removeEventListener("keydown", closeOnEscape);
         });
       });
       const PrLine = (line: { readonly pr: MyPr; readonly merged: boolean }): JSX.Element => {
@@ -373,7 +385,7 @@ export default Plugin.define({
                 )}
               </For>
             </select>
-            <details style={{ ...SELECT_STYLE, position: "relative", padding: "0" }}>
+            <details ref={statusMenu} style={{ ...SELECT_STYLE, position: "relative", padding: "0" }}>
               <summary style={{ cursor: "pointer", height: "100%", display: "flex", "align-items": "center", "box-sizing": "border-box", padding: "0 6px", margin: "0", "list-style": "none", "white-space": "nowrap", overflow: "hidden", "text-overflow": "ellipsis" }}>
                 {statusSummary(choices().statuses)} ▾
               </summary>
