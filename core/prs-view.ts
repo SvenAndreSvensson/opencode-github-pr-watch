@@ -158,6 +158,22 @@ export function readChoices(stored: (key: string) => string | null): PrsChoices 
   };
 }
 
+/**
+ * Choices are kept per session (key + "/" + session id). The last choice made anywhere is also kept under the plain
+ * key, as the start for sessions that haven't chosen yet.
+ */
+export function readSessionChoices(stored: (key: string) => string | null, sessionID: string): PrsChoices {
+  return readChoices((key) => stored(`${key}/${sessionID}`) ?? stored(key));
+}
+
+/** The storage writes for one choice: the session's own, and the start for new sessions. */
+export function choiceWrites<K extends keyof PrsChoices>(key: K, value: PrsChoices[K], sessionID: string): [string, string][] {
+  if (!(key in CHOICE_KEYS)) return [];
+  const plain = CHOICE_KEYS[key as keyof typeof CHOICE_KEYS];
+  const text = Array.isArray(value) ? value.join(",") : String(value);
+  return [[`${plain}/${sessionID}`, text], [plain, text]];
+}
+
 /** Stored as a comma list; unknown entries are dropped, and nothing stored means all. */
 function readStatuses(stored: string | null): readonly Status[] {
   if (stored === null) return ALL_STATUSES;

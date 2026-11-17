@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ALL_STATUSES, CHOICE_KEYS, prsView, readChoices, statusOf, statusSummary, toggleStatus, type PrsChoices } from "../core/prs-view";
+import { ALL_STATUSES, CHOICE_KEYS, choiceWrites, prsView, readChoices, readSessionChoices, statusOf, statusSummary, toggleStatus, type PrsChoices } from "../core/prs-view";
 import type { MyPr } from "../core/my-prs";
 
 const pr = (repo: string, number: number, extra: Partial<MyPr> = {}): MyPr => ({
@@ -121,6 +121,25 @@ describe("statuses: what a line's watch says about it", () => {
     expect(prsView(both, choices({ statuses: ["progress"] }), "s1").runs.map((r) => r.id)).toEqual(["o/a run 5"]);
     expect(prsView(both, choices({ statuses: ["review"] }), "s1").merged).toEqual([]);
     expect(prsView(both, choices({ statuses: [] }), "s1").openEmpty).toBe("No open PRs match.");
+  });
+});
+
+describe("choices per session", () => {
+  const storage = (entries: Record<string, string>) => (key: string) => entries[key] ?? null;
+
+  test("a session's own choices win over the last ones made anywhere", () => {
+    const stored = storage({ [CHOICE_KEYS.grouping]: "topic", [`${CHOICE_KEYS.grouping}/s1`]: "none", [CHOICE_KEYS.drafts]: "false" });
+    expect(readSessionChoices(stored, "s1")).toEqual(choices({ grouping: "none", drafts: false }));
+  });
+
+  test("a new session starts with the last choices made anywhere", () => {
+    expect(readSessionChoices(storage({ [CHOICE_KEYS.grouping]: "topic" }), "s2")).toEqual(choices({ grouping: "topic" }));
+  });
+
+  test("a choice is stored for the session and as the start for new sessions; the search is never stored", () => {
+    expect(choiceWrites("grouping", "topic", "s1")).toEqual([[`${CHOICE_KEYS.grouping}/s1`, "topic"], [CHOICE_KEYS.grouping, "topic"]]);
+    expect(choiceWrites("statuses", ["review", "done"], "s1")).toEqual([[`${CHOICE_KEYS.statuses}/s1`, "review,done"], [CHOICE_KEYS.statuses, "review,done"]]);
+    expect(choiceWrites("search", "x", "s1")).toEqual([]);
   });
 });
 

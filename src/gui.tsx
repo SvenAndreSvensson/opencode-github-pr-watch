@@ -7,7 +7,7 @@ import type { Topic } from "../core/topics";
 import { activities as trackActivities, keepMerged, panelOperations, type LoadedPrs, type PanelPort, type PanelSession } from "../core/panel-operations";
 import { DEMO_KEY, demoData, demoPort } from "../core/demo";
 import { lineDetail, pillView, prOfRow } from "../core/panel-text";
-import { ALL_STATUSES, CHOICE_KEYS, prsView, readChoices, STATUS_LABELS, statusSummary, toggleStatus, type Grouping, type PrsChoices } from "../core/prs-view";
+import { ALL_STATUSES, choiceWrites, prsView, readSessionChoices, STATUS_LABELS, statusSummary, toggleStatus, type Grouping, type PrsChoices } from "../core/prs-view";
 import { PrWatch } from "../rpc";
 
 interface Row {
@@ -222,16 +222,17 @@ export default Plugin.define({
     };
 
     // Topics come from a light model on the server, for the PRs listed; like the lists they stay while new ones load.
-    // Kept across tab and session switches, but not stored: a search is for now.
-    const [choices, setChoices] = createSignal<PrsChoices>(readChoices((key) => localStorage.getItem(key)));
-    const choose = <K extends keyof PrsChoices>(key: K, value: PrsChoices[K]) => {
-      setChoices((now) => ({ ...now, [key]: value }));
-      if (key in CHOICE_KEYS) localStorage.setItem(CHOICE_KEYS[key as keyof typeof CHOICE_KEYS], String(value));
+    // The filters are each session's own; the search is kept while the app runs, but not stored.
+    const [choiceStore, setChoiceStore] = createStore<Record<string, PrsChoices>>({});
+    const choicesFor = (sessionID: string): PrsChoices => choiceStore[sessionID] ?? readSessionChoices((key) => localStorage.getItem(key), sessionID);
+    const chooseFor = <K extends keyof PrsChoices>(sessionID: string, key: K, value: PrsChoices[K]) => {
+      setChoiceStore(sessionID, { ...choicesFor(sessionID), [key]: value });
+      for (const [storageKey, text] of choiceWrites(key, value, sessionID)) localStorage.setItem(storageKey, text);
     };
     const [topics, setTopics] = createSignal<readonly Topic[]>();
     const [topicsError, setTopicsError] = createSignal<string>();
     const loadTopics = (sessionID: string) => {
-      if (choices().grouping !== "topic") return;
+      if (choicesFor(sessionID).grouping !== "topic") return;
       setMyPrsLoading((n) => n + 1);
       void ops
         .loadTopics(sessionID, showMerged(), topics() !== undefined)
@@ -252,6 +253,8 @@ export default Plugin.define({
         loadMyPrs();
         loadTopics(props.session.id);
       };
+      const choices = () => choicesFor(props.session.id);
+      const choose = <K extends keyof PrsChoices>(key: K, value: PrsChoices[K]) => chooseFor(props.session.id, key, value);
       const view = () => prsView(data() ?? { open: [], watchedRows: [] }, choices(), props.session.id, topics());
       const openSession = (row: Row) => () => port.openSession(props.session.server.id, row.sessionID!);
       onMount(() => {
