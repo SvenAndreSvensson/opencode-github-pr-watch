@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "opencode-pr-watch",
+      "name": "opencode-github-pr-watch",
       "dependencies": {
         "@opencode/plugin": "2.3.0",
         "@opencode/schema": "2.3.0",

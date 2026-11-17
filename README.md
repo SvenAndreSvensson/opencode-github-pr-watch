@@ -1,10 +1,10 @@
-# opencode-pr-watch
+# opencode-github-pr-watch
 
 OpenCode V2 plugin that watches a GitHub pull request until it is deployed to production, so the agent doesn't have to poll with `sleep`.
 
 Code polls `gh` (checks, review, merge, workflow runs and jobs on the merge commit). Key events are reported by fixed rules; a model only judges the remaining changes. The session gets a message for anything worth knowing, until the PR is deployed, closed, or merged without a deploy.
 
-> **Note:** this plugin grew out of my own day-to-day work, so it reflects the repos, pipelines and habits I know. Some of it may assume naming or conventions (job names, how deploys and approvals are set up in GitHub Actions) that don't match yours. If something is reported wrongly or not at all for your setup, please give feedback and [open an issue](https://github.com/anderssv/opencode-pr-watch/issues) with what you expected and what happened. I'll do my best to fix it. The debug log (see [Debug log](#debug-log)) usually shows what the plugin saw and decided, which helps a lot.
+> **Note:** this plugin grew out of my own day-to-day work, so it reflects the repos, pipelines and habits I know. Some of it may assume naming or conventions (job names, how deploys and approvals are set up in GitHub Actions) that don't match yours. If something is reported wrongly or not at all for your setup, please give feedback and [open an issue](https://github.com/anderssv/opencode-github-pr-watch/issues) with what you expected and what happened. I'll do my best to fix it. The debug log (see [Debug log](#debug-log)) usually shows what the plugin saw and decided, which helps a lot.
 
 ## Install
 
@@ -13,7 +13,7 @@ Requirements: OpenCode V2 (2.3 or later), the GitHub CLI `gh` logged in to the r
 Add the plugin to your OpenCode config (`~/.config/opencode/opencode.json`), with any options from [Options](#options):
 
 ```jsonc
-{ "plugins": [{ "package": "opencode-pr-watch" }] }
+{ "plugins": [{ "package": "opencode-github-pr-watch" }] }
 ```
 
 ## Tools
@@ -88,14 +88,14 @@ The judging model must come from the same provider the session has selected, for
 {
   "plugins": [
     {
-      "package": "opencode-pr-watch", // or the path to a local checkout
+      "package": "opencode-github-pr-watch", // or the path to a local checkout
       "options": {
         "preferences": ["haiku", "mini", "flash"], // substrings matched against model IDs of the session's provider, in order
         "stuckMinutes": 30, // report a deploy job unfinished for longer than this
         "ghPath": "/opt/homebrew/bin/gh", // optional; gh is found on your login shell's PATH (mise shims skipped), then in /opt/homebrew/bin and /usr/local/bin
         "maxMinutes": 30, // limit when a workflow has too little history, and for auto-merge/auto-update waits
         "desktopNotifications": true, // macOS notification with the watcher's message
-        "debugLog": true, // JSON-lines debug log at ~/.local/state/opencode-pr-watch/debug.jsonl; false, or a path
+        "debugLog": true, // JSON-lines debug log at ~/.local/state/opencode-github-pr-watch/debug.jsonl; false, or a path
         "bookkeepingJobs": ["detect changes", "build status"] // jobs that only detect changes or report a status in monorepos; defaults cover common names
       }
     }
@@ -107,7 +107,7 @@ If no preference matches, the session's own model is used.
 
 ## Debug log
 
-Every decision is written as one JSON line to `~/.local/state/opencode-pr-watch/debug.jsonl` (rotated to `.1` at 5 MB). Set `"debugLog": false` to turn it off, or a path to write elsewhere. Events, each with the watch id:
+Every decision is written as one JSON line to `~/.local/state/opencode-github-pr-watch/debug.jsonl` (rotated to `.1` at 5 MB). Set `"debugLog": false` to turn it off, or a path to write elsewhere. Events, each with the watch id:
 
 - `command`: a shell command with a merge, rerun, branch update, bot command or dispatch, what was detected, and how long it ran.
 - `start`, `start-kept`, `start-skipped`, `no-watch`, `unwatch`, `resumed`: why a watch started, continued, didn't start or stopped.
@@ -117,7 +117,7 @@ Every decision is written as one JSON line to `~/.local/state/opencode-pr-watch/
 - `notify`, `delivered`, `deliver-dropped`, `dropped`: messages sent, delivered, or dropped (unwatched, superseded, stale).
 - `read-failed`: GitHub couldn't be read, so the check decided nothing. `tolerated-error`: something optional failed and was left out. `check-failed`: a check threw and will be retried.
 
-Find one watch's history with `grep '"id":"o/r#123"' ~/.local/state/opencode-pr-watch/debug.jsonl`.
+Find one watch's history with `grep '"id":"o/r#123"' ~/.local/state/opencode-github-pr-watch/debug.jsonl`.
 
 ## Notifications
 

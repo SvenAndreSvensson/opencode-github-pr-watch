@@ -42,7 +42,7 @@ interface PrWatchOptions {
   ghPath?: string;
   /** Also show a macOS notification with the watcher's message. Default true. */
   desktopNotifications?: boolean;
-  /** Write a JSON-lines debug log of what each watch saw and decided: true (default, ~/.local/state/opencode-pr-watch/debug.jsonl), false, or a path. */
+  /** Write a JSON-lines debug log of what each watch saw and decided: true (default, ~/.local/state/opencode-github-pr-watch/debug.jsonl), false, or a path. */
   debugLog?: boolean | string;
   /** Names of jobs that only detect changes or report a status (monorepo bookkeeping). Defaults cover common names. */
   bookkeepingJobs?: string[];
@@ -90,7 +90,7 @@ export default Plugin.define({
     const debug: DebugLog =
       options.debugLog === false
         ? noDebugLog
-        : fileDebugLog(typeof options.debugLog === "string" ? options.debugLog : join(homedir(), ".local", "state", "opencode-pr-watch", "debug.jsonl"));
+        : fileDebugLog(typeof options.debugLog === "string" ? options.debugLog : join(homedir(), ".local", "state", "opencode-github-pr-watch", "debug.jsonl"));
     debug("setup", { directory });
     // A model answer the code couldn't fully use: what was asked, which model, what was wrong, and what it said.
     const badAnswer = (call: string, model: { providerID: string; id: string }, text: string, fields: Record<string, unknown> = {}) => (problem: string) =>

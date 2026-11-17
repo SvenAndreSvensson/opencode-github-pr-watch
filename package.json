@@ -1,5 +1,5 @@
 {
-  "name": "opencode-pr-watch",
+  "name": "opencode-github-pr-watch",
   "version": "0.1.0",
   "description": "OpenCode plugin that watches GitHub pull requests and workflow runs until a person has to act or the change is deployed, with a desktop pill and a PRs side panel",
   "type": "module",
@@ -28,7 +28,7 @@
   "author": "Anders Sveen <anders@f12.no>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anderssv/opencode-pr-watch.git"
+    "url": "git+https://github.com/anderssv/opencode-github-pr-watch.git"
   },
   "license": "MIT",
   "dependencies": {
