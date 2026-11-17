@@ -2,8 +2,11 @@ import { createSignal, For, Index, onCleanup, onMount, Show, type JSX } from "so
 import { createStore } from "solid-js/store";
 import { ComposerPill, createKeyed, Panel, Plugin, Style, type ComposerPillTone, type IconName } from "@opencode/plugin/gui";
 import { PRS_TAB } from "../core/panel-tab";
-import { allPrs, byRepo, matchesSearch, organisationsOf, prList, prSessionPrompt, runWatches, watchedIn, withWatchedPrs, type MyPr, type MyPrSort } from "../core/my-prs";
-import { byTopic, type Topic } from "../core/topics";
+import type { MyPr, MyPrSort } from "../core/my-prs";
+import type { Topic } from "../core/topics";
+import { activities as trackActivities, keepMerged, panelOperations, type LoadedPrs, type PanelPort, type PanelSession } from "../core/panel-operations";
+import { lineDetail, pillView, prOfRow } from "../core/panel-text";
+import { CHOICE_KEYS, prsView, readChoices, type Grouping, type PrsChoices } from "../core/prs-view";
 import { PrWatch } from "../rpc";
 
 interface Row {
@@ -28,26 +31,15 @@ const LOOK: Record<Row["tone"], { icon: IconName; tone?: ComposerPillTone }> = {
   done: { icon: "circle-check", tone: "success" },
 };
 
+type PrGroupView = { readonly name: string; readonly kind: "repo" | "topic" | "all"; readonly prs: readonly MyPr[] };
+
 const TITLE = "Watched pull requests";
-const ORG_KEY = "pr-watch.my-prs.organisation";
-const SORT_KEY = "pr-watch.my-prs.sort";
-const DRAFTS_KEY = "pr-watch.my-prs.drafts";
-const OTHERS_KEY = "pr-watch.my-prs.others";
-const SESSION_ONLY_KEY = "pr-watch.my-prs.session-only";
-const GROUPING_KEY = "pr-watch.my-prs.grouping";
-type Grouping = "repo" | "topic" | "none";
-const GROUPINGS: readonly Grouping[] = ["repo", "topic", "none"];
 const SORTS: readonly { value: MyPrSort; label: string }[] = [
   { value: "name", label: "Sort by: Name" },
   { value: "newest", label: "Sort by: Newest PR" },
   { value: "oldest", label: "Sort by: Oldest PR" },
 ];
 const SELECT_STYLE = { flex: "1", "min-width": "0", padding: "4px 6px", "border-radius": "6px", background: "transparent", color: "inherit", border: "1px solid rgba(127,127,127,0.4)" };
-
-const age = (iso: string, now: number) => {
-  const days = Math.floor((now - Date.parse(iso)) / 86_400_000);
-  return days < 1 ? "today" : days === 1 ? "1 day" : `${days} days`;
-};
 
 export default Plugin.define({
   setup(ctx) {
@@ -77,22 +69,40 @@ export default Plugin.define({
       },
     );
 
-    type PanelSession = { readonly id: string; readonly directory: string; readonly server: { readonly id: string } };
-    type PrRef = { readonly repo: string; readonly number: number; readonly title: string; readonly url: string };
-
-    // A new session about a PR, in the given session's folder and with its provider, model and agent, opened with the
-    // request to summarise the PR. Throws so the caller can show why it failed.
-    const startPrSession = async (from: PanelSession, pr: PrRef) => {
-      const current = await ctx.client.session.get({ sessionID: from.id as never });
-      const session = await ctx.client.session.create({
-        title: `PR #${pr.number} on ${pr.repo}`,
-        location: { directory: from.directory as never },
-        model: current.model,
-        agent: current.agent,
-      });
-      await ctx.client.session.prompt({ sessionID: session.id, text: prSessionPrompt({ ...pr, draft: false, createdAt: "" }) });
-      ctx.tabs.open({ server: from.server.id, id: session.id }, { focus: true });
+    const port: PanelPort = {
+      myPrs: async (merged) => (await ctx.client.rpc(PrWatch).myPrs({ merged })) as LoadedPrs<Row>,
+      myPrTopics: async (sessionID, merged) => ((await ctx.client.rpc(PrWatch).myPrTopics({ sessionID, merged })) as { topics: Topic[] }).topics,
+      watch: async (sessionID, pr) => ((await ctx.client.rpc(PrWatch).watch({ sessionID, pr })) as { message: string }).message,
+      unwatch: async (id) => void (await ctx.client.rpc(PrWatch).unwatch({ id })),
+      setNotify: async (id, notify) => void (await ctx.client.rpc(PrWatch).setNotify({ id, notify })),
+      session: async (sessionID) => {
+        const current = await ctx.client.session.get({ sessionID: sessionID as never });
+        return { model: current.model, agent: current.agent };
+      },
+      createSession: async (input) =>
+        (await ctx.client.session.create({ title: input.title, location: { directory: input.directory as never }, model: input.model as never, agent: input.agent as never })).id,
+      prompt: async (sessionID, text) => void (await ctx.client.session.prompt({ sessionID: sessionID as never, text })),
+      openSession: (server, sessionID) => ctx.tabs.open({ server, id: sessionID as never }, { focus: true }),
+      copy: (text) => ctx.system.copy(text),
     };
+
+    // Work in progress, shown together on the PRs tab's top line with one spinner, and the latest result after it.
+    const [running, setRunning] = createSignal<readonly string[]>([]);
+    const tracker = trackActivities(setRunning);
+    const [status, setStatus] = createSignal<string>();
+    const say = (text: string) => {
+      setStatus(text);
+      setTimeout(() => setStatus((now) => (now === text ? undefined : now)), 6_000);
+    };
+    const ops = panelOperations(port, { track: (text, work) => tracker.track(text, work), say });
+    const refresh = (ok: boolean) => {
+      if (!ok) return;
+      const sessionID = ctx.sessions.current()?.id;
+      if (sessionID) load(sessionID);
+      loadMyPrs();
+    };
+    const setNotify = (id: string, notify: "major" | "all") => void ops.setNotify(id, notify).then(refresh);
+    const stopWatching = (id: string) => void ops.stop(id).then(refresh);
 
     // The one line every list shows for a PR: its watch status icon (when watched), text, then the buttons. Those that
     // only sometimes show (the run or runs) come first, so the ones always there (watch or stop, new session, the PR on
@@ -163,12 +173,8 @@ export default Plugin.define({
       );
     };
 
-    // A watch in the pill and the PR watches tab. Run watches (no PR) get no new-session button.
-    const prOfRow = (row: Row): PrRef | undefined => {
-      const match = row.id.match(/^(.+)#(\d+)$/);
-      return match ? { repo: match[1]!, number: Number(match[2]), title: row.label.slice(row.id.length + 1), url: row.url } : undefined;
-    };
-    const WatchLine = (props: { readonly row: Row; readonly session: PanelSession; readonly onError: (text: string) => void }): JSX.Element => {
+    // A watch in the pill. Run watches (no PR) get no new-session button.
+    const WatchLine = (props: { readonly row: Row; readonly session: PanelSession }): JSX.Element => {
       // Read live: rows are reused by position when the list reloads.
       const pr = () => prOfRow(props.row);
       return (
@@ -180,62 +186,26 @@ export default Plugin.define({
           onStop={() => stopWatching(props.row.id)}
           onNewSession={
             pr()
-              ? () => void startPrSession(props.session, pr()!).catch((err: unknown) => props.onError(`Could not start a session: ${err instanceof Error ? err.message : String(err)}`))
+              ? () => void ops.startSession(props.session, pr()!)
               : undefined
           }
         />
       );
     };
 
-    // Work in progress, shown together on the PRs tab's top line with one spinner, and the latest result after it.
-    const [activities, setActivities] = createSignal<readonly { readonly id: number; readonly text: string }[]>([]);
-    let activitySeq = 0;
-    const track = <T,>(text: string, work: Promise<T>): Promise<T> => {
-      const id = ++activitySeq;
-      setActivities((now) => [...now, { id, text }]);
-      return work.finally(() => setActivities((now) => now.filter((a) => a.id !== id)));
-    };
-    const [status, setStatus] = createSignal<string>();
-    const say = (text: string) => {
-      setStatus(text);
-      setTimeout(() => setStatus((now) => (now === text ? undefined : now)), 6_000);
-    };
-    const failed = (what: string) => (err: unknown) => say(`${what}: ${err instanceof Error ? err.message : String(err)}`);
-
-    const setNotify = (id: string, notify: "major" | "all") =>
-      void track(notify === "all" ? `Reporting all progress for ${id}…` : `Reporting only changes of step for ${id}…`, ctx.client.rpc(PrWatch).setNotify({ id, notify }))
-        .then(() => {
-          say(notify === "all" ? `${id}: all progress will be reported.` : `${id}: only changes of step will be reported.`);
-          const sessionID = ctx.sessions.current()?.id;
-          if (sessionID) load(sessionID);
-          loadMyPrs();
-        })
-        .catch(failed(`Could not change what ${id} reports`));
-
-    const stopWatching = (id: string) =>
-      void track(`Stopping watching ${id}…`, ctx.client.rpc(PrWatch).unwatch({ id }))
-        .then(() => {
-          say(`Stopped watching ${id}.`);
-          const sessionID = ctx.sessions.current()?.id;
-          if (sessionID) load(sessionID);
-          loadMyPrs();
-        })
-        .catch((err: unknown) => setMyPrsError(err instanceof Error ? err.message : String(err)));
-
     // The loaded PR lists live here, not in the view, so switching tabs or sessions shows the last list at once and a
     // reload replaces it only when the new one has arrived.
-    const [myPrs, setMyPrs] = createSignal<{ open: readonly MyPr[]; merged?: readonly MyPr[]; watched: readonly string[]; watchedRows: readonly Row[] }>();
+    const [myPrs, setMyPrs] = createSignal<LoadedPrs<Row>>();
     const [myPrsError, setMyPrsError] = createSignal<string>();
     const [myPrsLoading, setMyPrsLoading] = createSignal(0);
     const [showMerged, setShowMerged] = createSignal(false);
     const loadMyPrs = () => {
       const merged = showMerged();
       setMyPrsLoading((n) => n + 1);
-      void track("Loading your PRs…", ctx.client.rpc(PrWatch).myPrs({ merged }))
-        .then((result) => {
-          const loaded = result as { open: MyPr[]; merged: MyPr[]; watched: string[]; watchedRows: Row[] };
-          // Without the merged list requested, the one shown before is kept for the next time it's expanded.
-          setMyPrs((before) => ({ open: loaded.open, watched: loaded.watched, watchedRows: loaded.watchedRows, ...(merged ? { merged: loaded.merged } : before?.merged ? { merged: before.merged } : {}) }));
+      void ops
+        .loadPrs(merged)
+        .then((loaded) => {
+          setMyPrs((before) => keepMerged(before, loaded as LoadedPrs<Row>, merged));
           setMyPrsError(undefined);
         })
         .catch((err: unknown) => setMyPrsError(err instanceof Error ? err.message : String(err)))
@@ -244,16 +214,20 @@ export default Plugin.define({
 
     // Topics come from a light model on the server, for the PRs listed; like the lists they stay while new ones load.
     // Kept across tab and session switches, but not stored: a search is for now.
-    const [search, setSearch] = createSignal("");
-    const [grouping, setGrouping] = createSignal<Grouping>(GROUPINGS.find((g) => g === localStorage.getItem(GROUPING_KEY)) ?? "repo");
+    const [choices, setChoices] = createSignal<PrsChoices>(readChoices((key) => localStorage.getItem(key)));
+    const choose = <K extends keyof PrsChoices>(key: K, value: PrsChoices[K]) => {
+      setChoices((now) => ({ ...now, [key]: value }));
+      if (key in CHOICE_KEYS) localStorage.setItem(CHOICE_KEYS[key as keyof typeof CHOICE_KEYS], String(value));
+    };
     const [topics, setTopics] = createSignal<readonly Topic[]>();
     const [topicsError, setTopicsError] = createSignal<string>();
     const loadTopics = (sessionID: string) => {
-      if (grouping() !== "topic") return;
+      if (choices().grouping !== "topic") return;
       setMyPrsLoading((n) => n + 1);
-      void track(topics() ? "Updating the topics…" : "Sorting your PRs into topics…", ctx.client.rpc(PrWatch).myPrTopics({ sessionID, merged: showMerged() }))
+      void ops
+        .loadTopics(sessionID, showMerged(), topics() !== undefined)
         .then((result) => {
-          setTopics((result as { topics: Topic[] }).topics);
+          setTopics(result);
           setTopicsError(undefined);
         })
         .catch((err: unknown) => setTopicsError(err instanceof Error ? err.message : String(err)))
@@ -269,14 +243,8 @@ export default Plugin.define({
         loadMyPrs();
         loadTopics(props.session.id);
       };
-      const pickGrouping = (value: Grouping) => {
-        setGrouping(value);
-        localStorage.setItem(GROUPING_KEY, value);
-        loadTopics(props.session.id);
-      };
-      const [organisation, setOrganisation] = createSignal(localStorage.getItem(ORG_KEY) ?? "");
-      const storedSort = localStorage.getItem(SORT_KEY);
-      const [sort, setSort] = createSignal<MyPrSort>(SORTS.some((s) => s.value === storedSort) ? (storedSort as MyPrSort) : "name");
+      const view = () => prsView(data() ?? { open: [], watchedRows: [] }, choices(), props.session.id, topics());
+      const openSession = (row: Row) => () => port.openSession(props.session.server.id, row.sessionID!);
       onMount(() => {
         load();
         const stop = ctx.client.rpc(PrWatch).events.on("changed", () => load());
@@ -286,99 +254,32 @@ export default Plugin.define({
           clearInterval(timer);
         });
       });
-      const pick = (value: string) => {
-        setOrganisation(value);
-        localStorage.setItem(ORG_KEY, value);
-      };
-      const watch = (pr: MyPr) => {
-        const id = `${pr.repo}#${pr.number}`;
-        void track(`Starting watching ${id}…`, ctx.client.rpc(PrWatch).watch({ sessionID: props.session.id, pr: id }))
-          .then((result) => {
-            say((result as { message: string }).message.split(". ")[0]!);
-            load();
-          })
-          .catch(failed(`Could not watch ${id}`));
-      };
-      const organisations = () => organisationsOf([...openPrs(), ...(data()?.merged ?? [])]);
-      const [drafts, setDrafts] = createSignal(localStorage.getItem(DRAFTS_KEY) !== "false");
-      const [others, setOthers] = createSignal(localStorage.getItem(OTHERS_KEY) !== "false");
-      const pickOthers = (value: boolean) => {
-        setOthers(value);
-        localStorage.setItem(OTHERS_KEY, String(value));
-      };
-      // My open PRs, plus the watched PRs I didn't open when those are shown.
-      const [sessionOnly, setSessionOnly] = createSignal(localStorage.getItem(SESSION_ONLY_KEY) === "true");
-      const pickSessionOnly = (value: boolean) => {
-        setSessionOnly(value);
-        localStorage.setItem(SESSION_ONLY_KEY, String(value));
-      };
-      const rows = () => data()?.watchedRows ?? [];
-      // This session's watches only, whoever opened the PR; otherwise my PRs, plus others' watched ones when shown.
-      const openPrs = () =>
-        sessionOnly()
-          ? watchedIn(withWatchedPrs(data()?.open ?? [], rows()), rows(), props.session.id)
-          : others() ? withWatchedPrs(data()?.open ?? [], rows()) : (data()?.open ?? []);
-      const mergedPrs = (merged: readonly MyPr[]) => (sessionOnly() ? watchedIn(merged, rows(), props.session.id) : merged);
-      const runs = () => runWatches(rows()).filter((row) => !sessionOnly() || row.sessionID === props.session.id);
-      const openSession = (row: Row) => () => ctx.tabs.open({ server: props.session.server.id, id: row.sessionID! }, { focus: true });
-      const pickDrafts = (value: boolean) => {
-        setDrafts(value);
-        localStorage.setItem(DRAFTS_KEY, String(value));
-      };
-      const shown = (prs: readonly MyPr[]) => byRepo(prs, organisation() || undefined, sort(), drafts());
-      const pickSort = (value: MyPrSort) => {
-        setSort(value);
-        localStorage.setItem(SORT_KEY, value);
-      };
-
       const PrLine = (line: { readonly pr: MyPr; readonly merged: boolean }): JSX.Element => {
         // Read live: rows are reused by position when the list reloads, so a line can show another PR next time.
-        const id = () => `${line.pr.repo}#${line.pr.number}`;
-        // The watch's own row, from whichever session watches the PR: its status, icon and run links.
-        const row = () => data()?.watchedRows?.find((r) => r.id === id());
-        // Watched PRs that aren't mine come from the watch, without an opening date.
-        const age_ = () =>
-          line.merged && line.pr.closedAt
-            ? `merged ${age(line.pr.closedAt, Date.now())} ago`
-            : line.pr.createdAt ? `${line.pr.draft ? "draft · " : ""}open ${age(line.pr.createdAt, Date.now())}` : "";
+        const row = () => view().watchOf(line.pr);
         return (
           <PrLineView
             text={
               <>
-                <Show when={repoOnLine()}>
+                <Show when={view().repoOnLine}>
                   <span style={{ opacity: "0.6" }}>{line.pr.repo.slice(line.pr.repo.indexOf("/") + 1)} </span>
                 </Show>
                 #{line.pr.number} {line.pr.title}
               </>
             }
-            detail={[row()?.detail, age_()].filter(Boolean).join(" · ")}
+            detail={lineDetail(line.pr, line.merged, row()?.detail, Date.now())}
             url={line.pr.url}
             row={row()}
-            onStop={row() ? () => stopWatching(id()) : undefined}
-            onWatch={!row() && !line.merged ? () => watch(line.pr) : undefined}
+            onStop={row() ? () => stopWatching(row()!.id) : undefined}
+            onWatch={!row() && !line.merged ? () => void ops.watch(props.session.id, line.pr).then((ok) => ok && load()) : undefined}
             onOpenSession={row()?.sessionID ? openSession(row()!) : undefined}
-            onNewSession={() =>
-              void track(`Starting a session about ${line.pr.repo}#${line.pr.number}…`, startPrSession(props.session, line.pr)).catch(failed("Could not start a session"))
-            }
+            onNewSession={() => void ops.startSession(props.session, line.pr)}
           />
         );
       };
 
-      // Without topics yet (or when they failed), the list stays grouped by repo.
-      const byTopicNow = () => grouping() === "topic" && topics() !== undefined;
-      // Each line names its repo unless the list is grouped by repo.
-      const repoOnLine = () => byTopicNow() || grouping() === "none";
-      // Sorting repos by name means nothing for topics; there it falls back to newest first, without changing the choice.
-      const effectiveSort = (): MyPrSort => (grouping() === "topic" && sort() === "name" ? "newest" : sort());
-      const searched = (prs: readonly MyPr[]) => prs.filter((pr) => matchesSearch(pr, search()));
-      const grouped = (prs: readonly MyPr[]) =>
-        grouping() === "none"
-          ? [{ name: "All PRs", prs: allPrs(prs, organisation() || undefined, sort(), drafts()), kind: "all" as const }].filter((g) => g.prs.length > 0)
-          : byTopicNow()
-            ? byTopic(prs, topics()!, organisation() || undefined, effectiveSort(), drafts()).map((g) => ({ ...g, kind: "topic" as const }))
-            : shown(prs).map((g) => ({ name: g.repo, prs: g.prs, kind: "repo" as const }));
-      const Groups = (groups: { readonly prs: readonly MyPr[]; readonly merged: boolean }): JSX.Element => (
-        <Index each={grouped(searched(groups.prs))}>
+      const Groups = (groups: { readonly groups: readonly PrGroupView[]; readonly merged: boolean }): JSX.Element => (
+        <Index each={groups.groups}>
           {(group, index) => {
             const slash = () => (group().kind === "repo" ? group().name.indexOf("/") : -1);
             return (
@@ -399,12 +300,7 @@ export default Plugin.define({
                     icon="copy"
                     label={`Copy these ${group().prs.length} PRs as a list`}
                     size="small"
-                    onClick={() =>
-                      void ctx.system
-                        .copy(prList(group().prs))
-                        .then(() => say(`Copied ${group().prs.length} PR${group().prs.length === 1 ? "" : "s"} from ${group().name}.`))
-                        .catch(failed("Could not copy"))
-                    }
+                    onClick={() => void ops.copy(group().name, group().prs)}
                   />
                 </div>
                 <div style={{ display: "flex", "flex-direction": "column", gap: "6px", "padding-left": "22px" }}>
@@ -420,41 +316,45 @@ export default Plugin.define({
         <div style={{ display: "flex", "flex-direction": "column", gap: "16px", padding: "12px", height: "100%", "overflow-y": "auto", "box-sizing": "border-box", "justify-content": "flex-start", "align-content": "flex-start" }}>
           {/* The top line: everything in progress with one spinner, else the latest result. Fixed height, so the list doesn't jump. */}
           <div role="status" style={{ display: "flex", "align-items": "center", gap: "8px", "font-size": "12px", "min-height": "18px", opacity: "0.85" }}>
-            <Show when={activities().length > 0} fallback={<span>{status() ?? ""}</span>}>
+            <Show when={running().length > 0} fallback={<span>{status() ?? ""}</span>}>
               <span class="pr-watch-spinning" style={{ display: "inline-flex" }}>
                 <ctx.ui.Icon name="refresh" size="small" />
               </span>
-              <span style={{ "min-width": "0", "overflow-wrap": "anywhere" }}>{activities().map((a) => a.text).join(" · ")}</span>
+              <span style={{ "min-width": "0", "overflow-wrap": "anywhere" }}>{running().join(" · ")}</span>
             </Show>
           </div>
           <input
             type="search"
             placeholder="Search title, repo or #number"
             aria-label="Search your PRs"
-            value={search()}
-            onInput={(event) => setSearch(event.currentTarget.value)}
+            value={choices().search}
+            onInput={(event) => choose("search", event.currentTarget.value)}
             // A fixed height: the host's input styles otherwise let it fill the panel's height.
             style={{ ...SELECT_STYLE, flex: "0 0 auto", width: "100%", height: "32px", "min-height": "32px", "max-height": "32px", "box-sizing": "border-box", padding: "0 8px" }}
           />
           <div style={{ display: "flex", "align-items": "center", gap: "8px", "margin-top": "-8px" }}>
             <select
               aria-label="Organisation"
-              value={organisation()}
-              onChange={(event) => pick(event.currentTarget.value)}
+              value={choices().organisation}
+              onChange={(event) => choose("organisation", event.currentTarget.value)}
               style={SELECT_STYLE}
             >
               <option value="">Org: All</option>
-              <For each={organisations()}>{(org) => <option value={org}>Org: {org}</option>}</For>
+              <For each={view().organisations}>{(org) => <option value={org}>Org: {org}</option>}</For>
             </select>
-            <select aria-label="Group by" value={grouping()} onChange={(event) => pickGrouping(event.currentTarget.value as Grouping)} style={SELECT_STYLE}>
+            <select aria-label="Group by" value={choices().grouping}
+              onChange={(event) => {
+                choose("grouping", event.currentTarget.value as Grouping);
+                loadTopics(props.session.id);
+              }} style={SELECT_STYLE}>
               <option value="repo">Group by: Repo</option>
               <option value="topic">Group by: Topic</option>
               <option value="none">Group by: None</option>
             </select>
-            <select aria-label="Sort" value={effectiveSort()} onChange={(event) => pickSort(event.currentTarget.value as MyPrSort)} style={SELECT_STYLE}>
+            <select aria-label="Sort" value={view().effectiveSort} onChange={(event) => choose("sort", event.currentTarget.value as MyPrSort)} style={SELECT_STYLE}>
               <For each={SORTS}>
                 {(option) => (
-                  <option value={option.value} disabled={option.value === "name" && grouping() === "topic"}>
+                  <option value={option.value} disabled={option.value === "name" && view().sortByNameDisabled}>
                     {option.label}
                   </option>
                 )}
@@ -471,34 +371,34 @@ export default Plugin.define({
           </div>
           <div style={{ display: "flex", "align-items": "center", gap: "16px", "flex-wrap": "wrap", "font-size": "12px", opacity: "0.85", "margin-top": "-8px" }}>
             <label style={{ display: "flex", "align-items": "center", gap: "6px", cursor: "pointer" }}>
-              <input type="checkbox" checked={drafts()} onChange={(event) => pickDrafts(event.currentTarget.checked)} />
+              <input type="checkbox" checked={choices().drafts} onChange={(event) => choose("drafts", event.currentTarget.checked)} />
               Show drafts
             </label>
             <label style={{ display: "flex", "align-items": "center", gap: "6px", cursor: "pointer" }} title="Watched PRs opened by others, such as bots or colleagues">
-              <input type="checkbox" checked={others()} onChange={(event) => pickOthers(event.currentTarget.checked)} />
+              <input type="checkbox" checked={choices().others} onChange={(event) => choose("others", event.currentTarget.checked)} />
               Show PRs that aren't mine
             </label>
             <label style={{ display: "flex", "align-items": "center", gap: "6px", cursor: "pointer" }} title="Only the PRs and runs this session watches">
-              <input type="checkbox" checked={sessionOnly()} onChange={(event) => pickSessionOnly(event.currentTarget.checked)} />
+              <input type="checkbox" checked={choices().sessionOnly} onChange={(event) => choose("sessionOnly", event.currentTarget.checked)} />
               Current session only
             </label>
           </div>
           <Show when={error()}>{(text) => <div style={{ color: "var(--text-danger, #c33)" }}>Could not load your PRs: {text()}</div>}</Show>
-          <Show when={grouping() === "topic" && topicsError()}>
+          <Show when={choices().grouping === "topic" && topicsError()}>
             {(text) => <div style={{ opacity: "0.8", "font-size": "12px" }}>Grouped by repo: {text()}</div>}
           </Show>
           <Show when={data()} fallback={<div style={{ opacity: "0.6" }}>Loading…</div>}>
-            {(loaded) => (
+            {(_) => (
               <>
-                <Show when={runs().length > 0}>
+                <Show when={view().runs.length > 0}>
                   <section style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
                     <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
                       <ctx.ui.Icon name="settings-gear" size="small" />
                       <span style={{ "font-weight": "600", flex: "1" }}>Workflow runs</span>
-                      <span style={{ opacity: "0.6", "font-size": "12px" }}>{runs().length}</span>
+                      <span style={{ opacity: "0.6", "font-size": "12px" }}>{view().runs.length}</span>
                     </div>
                     <div style={{ display: "flex", "flex-direction": "column", gap: "6px", "padding-left": "22px" }}>
-                      <Index each={runs()}>
+                      <Index each={view().runs}>
                         {(row) => (
                           <PrLineView
                             text={row().label}
@@ -513,11 +413,8 @@ export default Plugin.define({
                     </div>
                   </section>
                 </Show>
-                <Show
-                  when={shown(searched(openPrs())).length > 0}
-                  fallback={<div style={{ opacity: "0.6" }}>{search().trim() ? "No open PRs match." : sessionOnly() ? "No PRs watched in this session." : "No open PRs."}</div>}
-                >
-                  <Groups prs={openPrs()} merged={false} />
+                <Show when={view().openEmpty === undefined} fallback={<div style={{ opacity: "0.6" }}>{view().openEmpty}</div>}>
+                  <Groups groups={view().open} merged={false} />
                 </Show>
                 <button
                   type="button"
@@ -534,10 +431,10 @@ export default Plugin.define({
                   {showMerged() ? "▾" : "▸"} Recently merged (7 days)
                 </button>
                 <Show when={showMerged()}>
-                  <Show when={loaded().merged} fallback={<div style={{ opacity: "0.6" }}>Loading…</div>}>
+                  <Show when={view().merged} fallback={<div style={{ opacity: "0.6" }}>Loading…</div>}>
                     {(merged) => (
-                      <Show when={shown(searched(mergedPrs(merged()))).length > 0} fallback={<div style={{ opacity: "0.6" }}>{search().trim() ? "None match." : "None."}</div>}>
-                        <Groups prs={mergedPrs(merged())} merged />
+                      <Show when={view().mergedEmpty === undefined} fallback={<div style={{ opacity: "0.6" }}>{view().mergedEmpty}</div>}>
+                        <Groups groups={merged()} merged />
                       </Show>
                     )}
                   </Show>
@@ -564,20 +461,19 @@ export default Plugin.define({
     ctx.add(ComposerPill, {
       id: "watches",
       show: (input) => {
-        const rows = watches[input.session.id] ?? [];
-        if (rows.length === 0) return undefined;
-        const worst = rows.some((r) => r.tone === "failed") ? "failed" : rows.some((r) => r.tone === "waiting") ? "waiting" : "pending";
+        const pill = pillView(watches[input.session.id] ?? []);
+        if (!pill) return undefined;
         return {
           icon: "github",
-          label: `${rows.length} PR${rows.length === 1 ? "" : "s"} watched`,
-          ...(LOOK[worst].tone ? { tone: LOOK[worst].tone } : {}),
+          label: pill.label,
+          ...(LOOK[pill.worst].tone ? { tone: LOOK[pill.worst].tone } : {}),
           title: TITLE,
         };
       },
       // One line per PR: where it is, with buttons that open the PR and the run it's waiting on in the browser.
       menu: (input) => (
         <div style={{ display: "flex", "flex-direction": "column", gap: "6px", padding: "4px 0", width: "100%", "box-sizing": "border-box", "max-height": "min(480px, 60vh)", "overflow-y": "auto", "padding-right": "4px" }}>
-          <Index each={watches[input.session.id] ?? []}>{(row) => <WatchLine row={row()} session={input.session} onError={() => undefined} />}</Index>
+          <Index each={watches[input.session.id] ?? []}>{(row) => <WatchLine row={row()} session={input.session} />}</Index>
         </div>
       ),
     });
