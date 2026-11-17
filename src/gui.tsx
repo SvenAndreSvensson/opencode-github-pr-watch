@@ -7,7 +7,7 @@ import type { Topic } from "../core/topics";
 import { activities as trackActivities, keepMerged, panelOperations, type LoadedPrs, type PanelPort, type PanelSession } from "../core/panel-operations";
 import { DEMO_KEY, demoData, demoPort } from "../core/demo";
 import { lineDetail, pillView, prOfRow } from "../core/panel-text";
-import { CHOICE_KEYS, prsView, readChoices, type Grouping, type PrsChoices } from "../core/prs-view";
+import { ALL_STATUSES, CHOICE_KEYS, prsView, readChoices, STATUS_LABELS, statusSummary, type Grouping, type PrsChoices } from "../core/prs-view";
 import { PrWatch } from "../rpc";
 
 interface Row {
@@ -40,7 +40,7 @@ const SORTS: readonly { value: MyPrSort; label: string }[] = [
   { value: "newest", label: "Sort by: Newest PR" },
   { value: "oldest", label: "Sort by: Oldest PR" },
 ];
-const SELECT_STYLE = { flex: "1", "min-width": "0", padding: "4px 6px", "border-radius": "6px", background: "transparent", color: "inherit", border: "1px solid rgba(127,127,127,0.4)" };
+const SELECT_STYLE = { flex: "1 1 150px", "min-width": "150px", "box-sizing": "border-box" as const, height: "30px", padding: "4px 6px", "border-radius": "6px", background: "transparent", color: "inherit", border: "1px solid rgba(127,127,127,0.4)" };
 
 export default Plugin.define({
   setup(ctx) {
@@ -337,7 +337,8 @@ export default Plugin.define({
             // A fixed height: the host's input styles otherwise let it fill the panel's height.
             style={{ ...SELECT_STYLE, flex: "0 0 auto", width: "100%", height: "32px", "min-height": "32px", "max-height": "32px", "box-sizing": "border-box", padding: "0 8px" }}
           />
-          <div style={{ display: "flex", "align-items": "center", gap: "8px", "margin-top": "-8px" }}>
+          {/* Wraps when the panel is narrow: each control keeps at least SELECT_STYLE's min-width. */}
+          <div style={{ display: "flex", "align-items": "center", gap: "8px", "flex-wrap": "wrap", "margin-top": "-8px" }}>
             <select
               aria-label="Organisation"
               value={choices().organisation}
@@ -365,6 +366,33 @@ export default Plugin.define({
                 )}
               </For>
             </select>
+            <details style={{ ...SELECT_STYLE, position: "relative", padding: "0" }}>
+              <summary style={{ cursor: "pointer", height: "100%", display: "flex", "align-items": "center", "box-sizing": "border-box", padding: "0 6px", margin: "0", "list-style": "none", "white-space": "nowrap", overflow: "hidden", "text-overflow": "ellipsis" }}>
+                {statusSummary(choices().statuses)} ▾
+              </summary>
+              <div
+                style={{
+                  position: "absolute", "z-index": "10", top: "calc(100% + 4px)", left: "0", "min-width": "100%", "box-sizing": "border-box",
+                  display: "flex", "flex-direction": "column", gap: "6px", padding: "8px", "border-radius": "6px",
+                  background: "var(--background-base, #1e1e1e)", border: "1px solid rgba(127,127,127,0.4)", "box-shadow": "0 4px 12px rgba(0,0,0,0.3)",
+                }}
+              >
+                <For each={ALL_STATUSES}>
+                  {(status) => (
+                    <label style={{ display: "flex", "align-items": "center", gap: "6px", cursor: "pointer", "white-space": "nowrap" }}>
+                      <input
+                        type="checkbox"
+                        checked={choices().statuses.includes(status)}
+                        onChange={(event) =>
+                          choose("statuses", ALL_STATUSES.filter((s) => (s === status ? event.currentTarget.checked : choices().statuses.includes(s))))
+                        }
+                      />
+                      {STATUS_LABELS[status]}
+                    </label>
+                  )}
+                </For>
+              </div>
+            </details>
             <ctx.ui.IconButton
               icon="refresh"
               label="Reload"

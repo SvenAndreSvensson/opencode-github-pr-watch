@@ -7,6 +7,32 @@ import { byTopic, type Topic } from "./topics";
  */
 export type Grouping = "repo" | "topic" | "none";
 
+/** Where a line is, for the status filter: "needs-me" is everything a watch ends on because a person has to act. */
+export type Status = "needs-me" | "review" | "approval" | "progress" | "done" | "unwatched";
+export const ALL_STATUSES: readonly Status[] = ["needs-me", "review", "approval", "progress", "done", "unwatched"];
+export const STATUS_LABELS: Record<Status, string> = {
+  "needs-me": "Needs me",
+  review: "Waiting for review",
+  approval: "Waiting for approval",
+  progress: "In progress",
+  done: "Done",
+  unwatched: "Not watched",
+};
+
+/** The status dropdown's button text. */
+export function statusSummary(chosen: readonly Status[]): string {
+  if (chosen.length === ALL_STATUSES.length) return "Status: All";
+  if (chosen.length === 0) return "Status: None";
+  return chosen.length === 1 ? `Status: ${STATUS_LABELS[chosen[0]!]}` : `Status: ${chosen.length} of ${ALL_STATUSES.length}`;
+}
+
+export function statusOf(row: { readonly tone?: string; readonly waitingFor?: string } | undefined): Status {
+  if (!row) return "unwatched";
+  if (row.waitingFor === "code-review") return "review";
+  if (row.waitingFor === "run-approval") return "approval";
+  return row.tone === "pending" ? "progress" : row.tone === "done" ? "done" : "needs-me";
+}
+
 export interface PrsChoices {
   readonly organisation: string;
   readonly grouping: Grouping;
@@ -15,6 +41,7 @@ export interface PrsChoices {
   readonly others: boolean;
   readonly sessionOnly: boolean;
   readonly search: string;
+  readonly statuses: readonly Status[];
 }
 
 export interface WatchRowLike {
@@ -22,6 +49,8 @@ export interface WatchRowLike {
   readonly label: string;
   readonly url: string;
   readonly sessionID?: string;
+  readonly tone?: string;
+  readonly waitingFor?: string;
 }
 
 export interface PrsData<R extends WatchRowLike> {
@@ -62,8 +91,11 @@ export function prsView<R extends WatchRowLike>(data: PrsData<R>, choices: PrsCh
   const effectiveSort: MyPrSort = choices.grouping === "topic" && choices.sort === "name" ? "newest" : choices.sort;
   const organisation = choices.organisation || undefined;
 
+  const watched = new Map(rows.map((row) => [row.id, row]));
+  const watchOf = (pr: MyPr) => watched.get(`${pr.repo}#${pr.number}`);
+  const shownStatus = (row: WatchRowLike | undefined) => choices.statuses.includes(statusOf(row));
   const group = (prs: readonly MyPr[]): PrGroup[] => {
-    const found = prs.filter((pr) => matchesSearch(pr, choices.search));
+    const found = prs.filter((pr) => matchesSearch(pr, choices.search) && shownStatus(watchOf(pr)));
     if (choices.grouping === "none") {
       const all = allPrs(found, organisation, choices.sort, choices.drafts);
       return all.length > 0 ? [{ name: "All PRs", kind: "all", prs: all }] : [];
@@ -72,12 +104,11 @@ export function prsView<R extends WatchRowLike>(data: PrsData<R>, choices: PrsCh
     return byRepo(found, organisation, choices.sort, choices.drafts).map((g) => ({ name: g.repo, kind: "repo" as const, prs: g.prs }));
   };
 
-  const searching = choices.search.trim() !== "";
+  const searching = choices.search.trim() !== "" || choices.statuses.length < ALL_STATUSES.length;
   const openGroups = group(open);
   const mergedGroups = merged && group(merged);
-  const watched = new Map(rows.map((row) => [row.id, row]));
   return {
-    runs: runWatches(rows).filter((row) => !choices.sessionOnly || row.sessionID === sessionID),
+    runs: runWatches(rows).filter((row) => (!choices.sessionOnly || row.sessionID === sessionID) && shownStatus(row)),
     open: openGroups,
     ...(openGroups.length === 0
       ? { openEmpty: searching ? "No open PRs match." : choices.sessionOnly ? "No PRs watched in this session." : "No open PRs." }
@@ -88,7 +119,7 @@ export function prsView<R extends WatchRowLike>(data: PrsData<R>, choices: PrsCh
     effectiveSort,
     sortByNameDisabled: choices.grouping === "topic",
     repoOnLine: byTopicNow || choices.grouping === "none",
-    watchOf: (pr) => watched.get(`${pr.repo}#${pr.number}`),
+    watchOf,
   };
 }
 
@@ -99,6 +130,7 @@ export const CHOICE_KEYS = {
   drafts: "pr-watch.my-prs.drafts",
   others: "pr-watch.my-prs.others",
   sessionOnly: "pr-watch.my-prs.session-only",
+  statuses: "pr-watch.my-prs.statuses",
 } as const;
 
 const GROUPINGS: readonly Grouping[] = ["repo", "topic", "none"];
@@ -116,5 +148,13 @@ export function readChoices(stored: (key: string) => string | null): PrsChoices 
     others: stored(CHOICE_KEYS.others) !== "false",
     sessionOnly: stored(CHOICE_KEYS.sessionOnly) === "true",
     search: "",
+    statuses: readStatuses(stored(CHOICE_KEYS.statuses)),
   };
+}
+
+/** Stored as a comma list; unknown entries are dropped, and nothing stored means all. */
+function readStatuses(stored: string | null): readonly Status[] {
+  if (stored === null) return ALL_STATUSES;
+  const chosen = stored.split(",");
+  return ALL_STATUSES.filter((status) => chosen.includes(status));
 }

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { demoData, demoPort } from "../core/demo";
+import { demoData, demoPort, type DemoRow } from "../core/demo";
+import type { LoadedPrs } from "../core/panel-operations";
 import { prsView, readChoices } from "../core/prs-view";
 import { pillView } from "../core/panel-text";
 
@@ -7,7 +8,7 @@ const NOW = Date.parse("2026-11-17T12:00:00Z");
 
 describe("demo data: made-up PRs for screenshots", () => {
   test("fills every part of the tab and the pill", async () => {
-    const loaded = await demoPort(() => "ses_1", () => NOW).myPrs(true);
+    const loaded = (await demoPort(() => "ses_1", () => NOW).myPrs(true)) as LoadedPrs<DemoRow>;
     const view = prsView(loaded, readChoices(() => null), "ses_1");
     expect(view.runs.length).toBe(1);
     expect(view.open.map((g) => g.name)).toEqual(["acme/api", "acme/infra", "acme/shop"]);
@@ -17,7 +18,7 @@ describe("demo data: made-up PRs for screenshots", () => {
 
   test("topics cover every listed PR", async () => {
     const port = demoPort(() => "ses_1", () => NOW);
-    const loaded = await port.myPrs(true);
+    const loaded = (await port.myPrs(true)) as LoadedPrs<DemoRow>;
     const topics = (await port.myPrTopics("ses_1", true)).flatMap((t) => t.prs);
     const view = prsView(loaded, { ...readChoices(() => null), grouping: "topic" }, "ses_1", await port.myPrTopics("ses_1", true));
     expect(view.open.map((g) => g.name)).not.toContain("Other");

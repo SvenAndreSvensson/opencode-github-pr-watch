@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CHOICE_KEYS, prsView, readChoices, type PrsChoices } from "../core/prs-view";
+import { ALL_STATUSES, CHOICE_KEYS, prsView, readChoices, statusOf, statusSummary, type PrsChoices } from "../core/prs-view";
 import type { MyPr } from "../core/my-prs";
 
 const pr = (repo: string, number: number, extra: Partial<MyPr> = {}): MyPr => ({
@@ -8,7 +8,7 @@ const pr = (repo: string, number: number, extra: Partial<MyPr> = {}): MyPr => ({
 const row = (id: string, sessionID: string, extra: Record<string, unknown> = {}) => ({ id, label: `${id} title of ${id}`, url: `u/${id}`, sessionID, ...extra });
 
 const choices = (overrides: Partial<PrsChoices> = {}): PrsChoices => ({
-  organisation: "", grouping: "repo", sort: "name", drafts: true, others: true, sessionOnly: false, search: "", ...overrides,
+  organisation: "", grouping: "repo", sort: "name", drafts: true, others: true, sessionOnly: false, search: "", statuses: ALL_STATUSES, ...overrides,
 });
 const data = {
   open: [pr("o/b", 1), pr("o/a", 2, { draft: true }), pr("x/c", 3)],
@@ -82,6 +82,41 @@ describe("prsView: what the PRs tab shows", () => {
   });
 });
 
+describe("statuses: what a line's watch says about it", () => {
+  test("from the watch's tone and what it waits for; no watch is not watched", () => {
+    expect(statusOf(undefined)).toBe("unwatched");
+    expect(statusOf({ tone: "failed" })).toBe("needs-me");
+    expect(statusOf({ tone: "waiting" })).toBe("needs-me");
+    expect(statusOf({ tone: "waiting", waitingFor: "code-review" })).toBe("review");
+    expect(statusOf({ tone: "waiting", waitingFor: "run-approval" })).toBe("approval");
+    expect(statusOf({ tone: "pending" })).toBe("progress");
+    expect(statusOf({ tone: "pending", waitingFor: "run-approval" })).toBe("approval");
+    expect(statusOf({ tone: "done" })).toBe("done");
+  });
+
+  test("the dropdown says what is chosen", () => {
+    expect(statusSummary(ALL_STATUSES)).toBe("Status: All");
+    expect(statusSummary([])).toBe("Status: None");
+    expect(statusSummary(["review"])).toBe("Status: Waiting for review");
+    expect(statusSummary(["review", "done"])).toBe("Status: 2 of 6");
+  });
+
+  test("the filter keeps only lines with a chosen status, runs and merged PRs too", () => {
+    const rows = [
+      row("o/a#2", "s1", { tone: "waiting", waitingFor: "code-review" }),
+      row("bot/dep#7", "s2", { tone: "failed" }),
+      row("o/a run 5", "s1", { tone: "pending" }),
+    ];
+    const both = { ...data, watchedRows: rows };
+    expect(numbers(prsView(both, choices({ statuses: ["review"] }), "s1").open)).toEqual([2]);
+    expect(numbers(prsView(both, choices({ statuses: ["needs-me", "unwatched"] }), "s1").open)).toEqual([7, 1, 3]);
+    expect(prsView(both, choices({ statuses: ["review"] }), "s1").runs).toEqual([]);
+    expect(prsView(both, choices({ statuses: ["progress"] }), "s1").runs.map((r) => r.id)).toEqual(["o/a run 5"]);
+    expect(prsView(both, choices({ statuses: ["review"] }), "s1").merged).toEqual([]);
+    expect(prsView(both, choices({ statuses: [] }), "s1").openEmpty).toBe("No open PRs match.");
+  });
+});
+
 describe("readChoices: the stored preferences, with defaults for anything missing or unknown", () => {
   test("defaults", () => {
     expect(readChoices(() => null)).toEqual(choices());
@@ -91,7 +126,11 @@ describe("readChoices: the stored preferences, with defaults for anything missin
     const stored: Record<string, string> = {
       [CHOICE_KEYS.organisation]: "o", [CHOICE_KEYS.grouping]: "topic", [CHOICE_KEYS.sort]: "sideways",
       [CHOICE_KEYS.drafts]: "false", [CHOICE_KEYS.others]: "false", [CHOICE_KEYS.sessionOnly]: "true",
+      [CHOICE_KEYS.statuses]: "review,bogus,done",
     };
-    expect(readChoices((key) => stored[key] ?? null)).toEqual(choices({ organisation: "o", grouping: "topic", drafts: false, others: false, sessionOnly: true }));
+    expect(readChoices((key) => stored[key] ?? null)).toEqual(
+      choices({ organisation: "o", grouping: "topic", drafts: false, others: false, sessionOnly: true, statuses: ["review", "done"] }),
+    );
+    expect(readChoices((key) => (key === CHOICE_KEYS.statuses ? "" : null)).statuses).toEqual([]);
   });
 });
