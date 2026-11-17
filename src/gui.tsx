@@ -126,18 +126,21 @@ export default Plugin.define({
     }): JSX.Element => {
       const runLinks = () => line.row?.runLinks ?? (line.row?.runUrl ? [{ label: "Open the run", url: line.row.runUrl }] : []);
       return (
-        <div style={{ display: "flex", "align-items": "center", gap: "8px", "min-width": "0" }}>
-          {/* Every line has an icon here so the titles line up: the watch's state, or a dimmed ? when not watched. */}
-          <Show
-            when={line.row}
-            fallback={
-              <span title="Not watched" style={{ display: "inline-flex", opacity: "0.4" }}>
-                <ctx.ui.Icon name="help" size="small" />
-              </span>
-            }
-          >
-            {(row) => <ctx.ui.Icon name={LOOK[row().tone].icon} size="small" />}
-          </Show>
+        <div style={{ display: "flex", "align-items": "flex-start", gap: "8px", "min-width": "0" }}>
+          {/* Every line has an icon here so the titles line up: the watch's state, or a dimmed ? when not watched. At the
+              top, next to the title, when the text wraps. */}
+          <span style={{ display: "inline-flex", "align-self": "flex-start", "margin-top": "2px" }}>
+            <Show
+              when={line.row}
+              fallback={
+                <span title="Not watched" style={{ display: "inline-flex", opacity: "0.4" }}>
+                  <ctx.ui.Icon name="help" size="small" />
+                </span>
+              }
+            >
+              {(row) => <ctx.ui.Icon name={LOOK[row().tone].icon} size="small" />}
+            </Show>
+          </span>
           <div style={{ flex: "1", "min-width": "0" }}>
             <div style={{ "overflow-wrap": "anywhere" }}>{line.text}</div>
             <div style={{ opacity: "0.6", "font-size": "12px" }}>{line.detail}</div>
