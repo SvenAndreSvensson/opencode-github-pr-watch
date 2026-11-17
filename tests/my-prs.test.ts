@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { allPrs, byRepo, matchesSearch, myPrFrom, prList, runWatches, withWatchedPrs, organisationsOf, prSessionPrompt, type MyPr } from "../core/my-prs";
+import { allPrs, byRepo, matchesSearch, myPrFrom, prList, runWatches, watchedIn, withWatchedPrs, organisationsOf, prSessionPrompt, type MyPr } from "../core/my-prs";
 
 const pr = (repo: string, number: number, extra: Partial<MyPr> = {}): MyPr => ({
   repo, number, title: `PR ${number}`, url: `https://github.com/${repo}/pull/${number}`, draft: false, createdAt: "2026-11-10T10:00:00Z", ...extra,
@@ -124,5 +124,13 @@ describe("no grouping: one list", () => {
 
   test("the organisation and drafts filters apply", () => {
     expect(numbers("name", "o", false)).toEqual([2, 1]);
+  });
+});
+
+describe("current session only", () => {
+  test("keeps the PRs this session watches", () => {
+    const prs = [pr("o/r", 1), pr("o/r", 2), pr("o/r", 3)];
+    const rows = [{ id: "o/r#1", sessionID: "s1" }, { id: "o/r#2", sessionID: "s2" }];
+    expect(watchedIn(prs, rows, "s1").map((p) => p.number)).toEqual([1]);
   });
 });

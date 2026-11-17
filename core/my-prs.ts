@@ -96,3 +96,9 @@ export function allPrs(prs: readonly MyPr[], organisation?: string, sort: MyPrSo
     .flatMap((group) => group.prs)
     .sort((a, b) => (sort === "name" ? 0 : sort === "oldest" ? newer(b, a) : newer(a, b)));
 }
+
+/** The PRs a given session watches. */
+export function watchedIn<R extends { readonly id: string; readonly sessionID?: string }>(prs: readonly MyPr[], rows: readonly R[], sessionID: string): MyPr[] {
+  const ids = new Set(rows.filter((row) => row.sessionID === sessionID).map((row) => row.id));
+  return prs.filter((pr) => ids.has(`${pr.repo}#${pr.number}`));
+}

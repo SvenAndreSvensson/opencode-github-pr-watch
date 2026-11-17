@@ -2,7 +2,7 @@ import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js"
 import { createStore } from "solid-js/store";
 import { ComposerPill, createKeyed, Panel, Plugin, Style, type ComposerPillTone, type IconName } from "@opencode/plugin/gui";
 import { PRS_TAB } from "../core/panel-tab";
-import { allPrs, byRepo, matchesSearch, organisationsOf, prList, prSessionPrompt, runWatches, withWatchedPrs, type MyPr, type MyPrSort } from "../core/my-prs";
+import { allPrs, byRepo, matchesSearch, organisationsOf, prList, prSessionPrompt, runWatches, watchedIn, withWatchedPrs, type MyPr, type MyPrSort } from "../core/my-prs";
 import { byTopic, type Topic } from "../core/topics";
 import { PrWatch } from "../rpc";
 
@@ -33,6 +33,7 @@ const ORG_KEY = "pr-watch.my-prs.organisation";
 const SORT_KEY = "pr-watch.my-prs.sort";
 const DRAFTS_KEY = "pr-watch.my-prs.drafts";
 const OTHERS_KEY = "pr-watch.my-prs.others";
+const SESSION_ONLY_KEY = "pr-watch.my-prs.session-only";
 const GROUPING_KEY = "pr-watch.my-prs.grouping";
 type Grouping = "repo" | "topic" | "none";
 const GROUPINGS: readonly Grouping[] = ["repo", "topic", "none"];
@@ -303,8 +304,19 @@ export default Plugin.define({
         localStorage.setItem(OTHERS_KEY, String(value));
       };
       // My open PRs, plus the watched PRs I didn't open when those are shown.
-      const openPrs = () => (others() ? withWatchedPrs(data()?.open ?? [], data()?.watchedRows ?? []) : (data()?.open ?? []));
-      const runs = () => runWatches(data()?.watchedRows ?? []);
+      const [sessionOnly, setSessionOnly] = createSignal(localStorage.getItem(SESSION_ONLY_KEY) === "true");
+      const pickSessionOnly = (value: boolean) => {
+        setSessionOnly(value);
+        localStorage.setItem(SESSION_ONLY_KEY, String(value));
+      };
+      const rows = () => data()?.watchedRows ?? [];
+      // This session's watches only, whoever opened the PR; otherwise my PRs, plus others' watched ones when shown.
+      const openPrs = () =>
+        sessionOnly()
+          ? watchedIn(withWatchedPrs(data()?.open ?? [], rows()), rows(), props.session.id)
+          : others() ? withWatchedPrs(data()?.open ?? [], rows()) : (data()?.open ?? []);
+      const mergedPrs = (merged: readonly MyPr[]) => (sessionOnly() ? watchedIn(merged, rows(), props.session.id) : merged);
+      const runs = () => runWatches(rows()).filter((row) => !sessionOnly() || row.sessionID === props.session.id);
       const openSession = (row: Row) => () => ctx.tabs.open({ server: props.session.server.id, id: row.sessionID! }, { focus: true });
       const pickDrafts = (value: boolean) => {
         setDrafts(value);
@@ -461,6 +473,10 @@ export default Plugin.define({
               <input type="checkbox" checked={others()} onChange={(event) => pickOthers(event.currentTarget.checked)} />
               Show PRs that aren't mine
             </label>
+            <label style={{ display: "flex", "align-items": "center", gap: "6px", cursor: "pointer" }} title="Only the PRs and runs this session watches">
+              <input type="checkbox" checked={sessionOnly()} onChange={(event) => pickSessionOnly(event.currentTarget.checked)} />
+              Current session only
+            </label>
           </div>
           <Show when={error()}>{(text) => <div style={{ color: "var(--text-danger, #c33)" }}>Could not load your PRs: {text()}</div>}</Show>
           <Show when={grouping() === "topic" && topicsError()}>
@@ -494,7 +510,7 @@ export default Plugin.define({
                 </Show>
                 <Show
                   when={shown(searched(openPrs())).length > 0}
-                  fallback={<div style={{ opacity: "0.6" }}>{search().trim() ? "No open PRs match." : "No open PRs."}</div>}
+                  fallback={<div style={{ opacity: "0.6" }}>{search().trim() ? "No open PRs match." : sessionOnly() ? "No PRs watched in this session." : "No open PRs."}</div>}
                 >
                   <Groups prs={openPrs()} merged={false} />
                 </Show>
@@ -515,8 +531,8 @@ export default Plugin.define({
                 <Show when={showMerged()}>
                   <Show when={loaded().merged} fallback={<div style={{ opacity: "0.6" }}>Loading…</div>}>
                     {(merged) => (
-                      <Show when={shown(searched(merged())).length > 0} fallback={<div style={{ opacity: "0.6" }}>{search().trim() ? "None match." : "None."}</div>}>
-                        <Groups prs={merged()} merged />
+                      <Show when={shown(searched(mergedPrs(merged()))).length > 0} fallback={<div style={{ opacity: "0.6" }}>{search().trim() ? "None match." : "None."}</div>}>
+                        <Groups prs={mergedPrs(merged())} merged />
                       </Show>
                     )}
                   </Show>
