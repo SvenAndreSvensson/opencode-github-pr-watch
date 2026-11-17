@@ -90,6 +90,8 @@ export interface PrFacts {
   readonly missingChecks: readonly string[];
   readonly mergedAt?: number;
   readonly deploy: Deploy;
+  /** After a merge without deploy runs: false when nothing a merge can start deploys, so there's nothing to wait for. */
+  readonly deployPossible?: boolean;
   readonly waitingJobs: readonly string[];
   /** Pipeline checks held at an environment approval before the merge (for example a plan that needs a reviewer to release it). */
   readonly waitingChecks: readonly string[];
@@ -279,8 +281,8 @@ export function nextStep(facts: PrFacts, now: number): Step {
       case "SUCCEEDED": return "DEPLOYED";
       case "NOTHING": return "NOTHING_TO_DEPLOY";
       // Right after a merge the deploy runs may not exist yet; only other workflows so far says nothing about the deploy.
-      case "UNIDENTIFIED": return now - (facts.mergedAt ?? now) < DEPLOY_START_GRACE_MS ? "WAIT_DEPLOY_START" : "DEPLOY_UNIDENTIFIED";
-      default: return now - (facts.mergedAt ?? now) < DEPLOY_START_GRACE_MS ? "WAIT_DEPLOY_START" : "NO_DEPLOY";
+      case "UNIDENTIFIED": return facts.deployPossible === false ? "NO_DEPLOY" : now - (facts.mergedAt ?? now) < DEPLOY_START_GRACE_MS ? "WAIT_DEPLOY_START" : "DEPLOY_UNIDENTIFIED";
+      default: return facts.deployPossible !== false && now - (facts.mergedAt ?? now) < DEPLOY_START_GRACE_MS ? "WAIT_DEPLOY_START" : "NO_DEPLOY";
     }
   }
   if (facts.draft) return "DRAFT";

@@ -148,7 +148,8 @@ export function phaseOf(facts: PrFacts, now: number): { phase: Phase } | { end: 
       const jobs = facts.failedRun?.jobs?.length ? `: ${facts.failedRun.jobs.join(", ")}` : "";
       return { end: `${facts.standaloneRun ? "the run failed" : `the merge pipeline failed${runText(facts)}`}${jobs}` };
     }
-    case "NO_DEPLOY": return { end: "merged, and no deploy started for the merge commit" };
+    case "NO_DEPLOY":
+      return { end: facts.deployPossible === false ? "merged; nothing that starts on a merge deploys in this repo" : "merged, and no deploy started for the merge commit" };
     case "NOTHING_TO_DEPLOY": return { end: "merged; nothing to deploy (no deploy job ran for this change)" };
     case "DEPLOY_UNIDENTIFIED": return { end: `couldn't tell which workflow deploys this repo (saw: ${(facts.undeterminedWorkflows ?? []).join(", ")})` };
   }

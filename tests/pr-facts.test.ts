@@ -443,6 +443,14 @@ describe("nextStep", () => {
     expect(nextStep(aFacts({ state: "MERGED", mergedAt: NOW - 20 * 60_000, deploy: "NO_RUNS" }), NOW)).toBe("NO_DEPLOY");
   });
 
+  test("merged where nothing that starts on a merge deploys: no waiting, nothing to follow", () => {
+    const justMerged = { state: "MERGED" as const, mergedAt: NOW - 60_000, deployPossible: false };
+    expect(nextStep(aFacts({ ...justMerged, deploy: "NO_RUNS" }), NOW)).toBe("NO_DEPLOY");
+    expect(nextStep(aFacts({ ...justMerged, deploy: "UNIDENTIFIED" }), NOW)).toBe("NO_DEPLOY");
+    expect(nextStep(aFacts({ ...justMerged, deploy: "NO_RUNS", deployPossible: true }), NOW)).toBe("WAIT_DEPLOY_START");
+    expect(nextStep(aFacts({ ...justMerged, deploy: "RUNNING" }), NOW)).toBe("DEPLOYING");
+  });
+
   test("closed", () => {
     expect(nextStep(aFacts({ state: "CLOSED" }), NOW)).toBe("CLOSED");
   });

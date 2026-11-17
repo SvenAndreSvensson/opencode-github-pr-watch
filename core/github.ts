@@ -3,6 +3,7 @@ import { findGh, ghFailure, mergePaths, PATH_MARKER, pathFromShell } from "./gh-
 import { logTail } from "./log-excerpt";
 import { approvalLine, upToDateLine } from "./pr-status";
 import type { WorkflowRole, WorkflowSummary } from "./workflow-role";
+import { deployPossible, startsOnMerge } from "./merge-triggers";
 import { checkName, factsFrom, isDeployJob, latestAttempts, pipelineChecks, summaryLine, type CheckView, type JobView, type PrFacts, type PrView, type RunWithJobs } from "./pr-facts";
 import { noDebugLog, tolerate, type DebugLog } from "./debug-log";
 import { myPrFrom, type MyPr, type SearchedPr } from "./my-prs";
@@ -163,6 +164,16 @@ export async function prSnapshot(
     return { text: `Could not read the checks: ${err instanceof Error ? err.message : String(err)}` };
   }
   let facts = factsFrom(view, runs, now, required, rerunning, baseRuns, { noDeploy });
+  // Merged without deploy runs: if nothing a merge starts can deploy, there's nothing to wait for.
+  if (view.state === "MERGED" && !noDeploy && (facts.deploy === "NO_RUNS" || facts.deploy === "UNIDENTIFIED")) {
+    const ids = await tolerate(debug, "workflows a merge starts", mergeWorkflows(gh, repo, view.baseRefName, cwd), undefined, { repo, pr });
+    if (ids) {
+      const roles = await Promise.all(ids.map((id) => tolerate(debug, "workflow role", roleOf?.(id), undefined, { repo, workflow: id })));
+      const possible = deployPossible(roles);
+      debug("deploy-possible", { repo, pr, workflows: ids, roles, possible });
+      if (possible !== undefined) facts = { ...facts, deployPossible: possible };
+    }
+  }
   if (view.state === "OPEN" && view.headRefOid) {
     const blocked = await tolerate(debug, "checks queued behind other runs", blockedChecks(gh, repo, view.headRefOid, cwd), [], { repo, pr });
     if (blocked.length > 0) facts = { ...facts, blockedChecks: blocked };
@@ -422,6 +433,24 @@ async function workflowUsuallyDeploys(gh: Gh, repo: string, workflow: number, cw
   const deploys = last[0] ? (await jobsOf(gh, repo, last[0].databaseId, cwd)).some(isDeployJob) : false;
   deploysCache.set(key, deploys);
   return deploys;
+}
+
+/**
+ * The active workflows a merge into the base branch can start, read from their files on that branch. GitHub's own
+ * setups (path "dynamic/...": CodeQL, Pages, Dependabot) are left out: they scan or publish docs, never deploy the
+ * service. Undefined when a file can't be read or understood, so the caller keeps waiting for runs as before.
+ */
+export async function mergeWorkflows(gh: Gh, repo: string, base: string, cwd: string): Promise<number[] | undefined> {
+  const { workflows } = JSON.parse(await gh(["api", `repos/${repo}/actions/workflows`], cwd)) as { workflows: { id: number; path: string; state: string }[] };
+  const files = workflows.filter((w) => w.state === "active" && w.path.startsWith(".github/"));
+  const starts = await Promise.all(
+    files.map(async (w) => {
+      const file = await tolerate(debug, "workflow file", gh(["api", `repos/${repo}/contents/${w.path}?ref=${encodeURIComponent(base)}`, "-H", "Accept: application/vnd.github.raw"], cwd), undefined, { repo, path: w.path });
+      return file === undefined ? undefined : startsOnMerge(file, base);
+    }),
+  );
+  if (starts.includes(undefined)) return undefined;
+  return files.filter((_, i) => starts[i]).map((w) => w.id);
 }
 
 /** What the model needs to judge a workflow: its name, file path, job names from its latest run, and the file itself. */
