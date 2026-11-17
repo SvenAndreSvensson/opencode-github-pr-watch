@@ -23,6 +23,10 @@ Requires OpenCode V2 (2.3 or later), the GitHub CLI `gh` logged in to the repos 
 
 In the OpenCode desktop app, a pill above the composer shows the session's watches, and a **PRs** tab in the side panel lists your open PRs and all watches, grouped by repo or by topic. See [Desktop](docs/desktop.md).
 
+![The PRs tab, grouped by topic](docs/images/prs-topics.png)
+
+![The pill above the composer, opened](docs/images/pill.png)
+
 ## Options
 
 All optional:
