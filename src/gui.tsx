@@ -110,6 +110,13 @@ export default Plugin.define({
     const setNotify = (id: string, notify: "major" | "all") => void ops.setNotify(id, notify).then(refresh);
     const stopWatching = (id: string) => void ops.stop(id).then(refresh);
 
+    // An icon button whose label shows on hover; the host's IconButton only uses it for screen readers.
+    const TipButton = (props: Parameters<typeof ctx.ui.IconButton>[0]): JSX.Element => (
+      <ctx.ui.Tooltip value={props.label}>
+        <ctx.ui.IconButton {...props} />
+      </ctx.ui.Tooltip>
+    );
+
     // The one line every list shows for a PR: its watch status icon (when watched), text, then the buttons. Those that
     // only sometimes show (the run or runs) come first, so the ones always there (watch or stop, new session, the PR on
     // GitHub) stay in the same columns down the list.
@@ -146,7 +153,7 @@ export default Plugin.define({
             <div style={{ opacity: "0.6", "font-size": "12px" }}>{line.detail}</div>
           </div>
           <Show when={line.onOpenSession}>
-            {(open) => <ctx.ui.IconButton icon="speech-bubble" label={`Open the watching session: ${line.row?.sessionTitle ?? ""}`} size="small" onClick={() => open()()} />}
+            {(open) => <TipButton icon="speech-bubble" label={`Open the watching session: ${line.row?.sessionTitle ?? ""}`} size="small" onClick={() => open()()} />}
           </Show>
           <Show when={line.row}>
             {(row) => {
@@ -154,7 +161,7 @@ export default Plugin.define({
               return (
                 // The bell: full when every bit of progress is reported, dimmed when only changes of step are.
                 <span style={{ display: "inline-flex", opacity: all() ? "1" : "0.45" }}>
-                  <ctx.ui.IconButton
+                  <TipButton
                     icon="notifications"
                     label={all() ? "Reporting all progress; click to report only changes of step" : "Reporting changes of step; click to report all progress"}
                     size="small"
@@ -168,16 +175,16 @@ export default Plugin.define({
             {(link) => (
               // A gear for the build or deploy run; it turns while the run is still going.
               <span class={line.row?.tone === "pending" && !line.row.runLinks ? "pr-watch-spinning" : undefined} style={{ display: "inline-flex" }}>
-                <ctx.ui.IconButton icon="settings-gear" label={link.label} size="small" onClick={() => ctx.system.openExternal(link.url)} />
+                <TipButton icon="settings-gear" label={link.label} size="small" onClick={() => ctx.system.openExternal(link.url)} />
               </span>
             )}
           </For>
-          <Show when={line.onStop}>{(stop) => <ctx.ui.IconButton icon="outline-eye-slash" label="Stop watching" size="small" onClick={() => stop()()} />}</Show>
-          <Show when={!line.onStop && line.onWatch}>{(watch) => <ctx.ui.IconButton icon="eye" label="Watch in this session" size="small" onClick={() => watch()()} />}</Show>
+          <Show when={line.onStop}>{(stop) => <TipButton icon="outline-eye-slash" label="Stop watching" size="small" onClick={() => stop()()} />}</Show>
+          <Show when={!line.onStop && line.onWatch}>{(watch) => <TipButton icon="eye" label="Watch in this session" size="small" onClick={() => watch()()} />}</Show>
           <Show when={line.onNewSession}>
-            {(start) => <ctx.ui.IconButton icon="new-session" label="New session about this PR" size="small" onClick={() => start()()} />}
+            {(start) => <TipButton icon="new-session" label="New session about this PR" size="small" onClick={() => start()()} />}
           </Show>
-          <ctx.ui.IconButton icon="github" label="Open the PR" size="small" onClick={() => ctx.system.openExternal(line.url)} />
+          <TipButton icon="github" label="Open the PR" size="small" onClick={() => ctx.system.openExternal(line.url)} />
         </div>
       );
     };
@@ -320,7 +327,7 @@ export default Plugin.define({
                     <span style={{ "font-weight": "600" }}>{group().name.slice(slash() + 1)}</span>
                   </div>
                   <span style={{ opacity: "0.6", "font-size": "12px" }}>{group().prs.length}</span>
-                  <ctx.ui.IconButton
+                  <TipButton
                     icon="copy"
                     label={`Copy these ${group().prs.length} PRs as a list`}
                     size="small"
@@ -418,7 +425,7 @@ export default Plugin.define({
                 </For>
               </div>
             </details>
-            <ctx.ui.IconButton
+            <TipButton
               icon="refresh"
               size="small"
               label="Reload, and make every watch check GitHub now"
