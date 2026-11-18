@@ -9,11 +9,13 @@ export interface ProcessState {
   /** The poll timers of each directory, shared so a new owner can cancel the previous owner's loop. */
   readonly timers: Map<string, Map<string, ReturnType<typeof setTimeout>>>;
   /** Each directory's "check every watch now", registered by the instance that owned the loop then. */
-  readonly checkers: Map<string, { readonly owner: symbol; readonly run: () => void }>;
+  readonly checkers: Map<string, { readonly owner: symbol; readonly run: () => void; readonly schedule?: (id: string, delayMs: number) => void }>;
   lastCheckNowAt?: number;
+  /** Orphaned watches and the directory whose loop took each over. */
+  readonly orphans: Map<string, string>;
 }
 
-export const newProcessState = (): ProcessState => ({ resumed: new Set(), owners: new Map(), timers: new Map(), checkers: new Map() });
+export const newProcessState = (): ProcessState => ({ resumed: new Set(), owners: new Map(), timers: new Map(), checkers: new Map(), orphans: new Map() });
 
 const KEY = Symbol.for("opencode-pr-watch/process");
 
@@ -23,6 +25,7 @@ export const processState = (): ProcessState => {
   const state = (global[KEY] ??= newProcessState());
   // A state made by an older version of this module (kept across a hot reload) lacks the newer fields.
   (state as { checkers?: ProcessState["checkers"] }).checkers ??= new Map();
+  (state as { orphans?: ProcessState["orphans"] }).orphans ??= new Map();
   return state;
 };
 
@@ -63,8 +66,19 @@ export const dropMessagesFor = (messages: readonly string[], id: string) => mess
 
 const CHECK_NOW_EVERY_MS = 20_000;
 
-export function onCheckNow(state: ProcessState, directory: string, owner: symbol, run: () => void): void {
-  state.checkers.set(directory, { owner, run });
+export function onCheckNow(state: ProcessState, directory: string, owner: symbol, run: () => void, schedule?: (id: string, delayMs: number) => void): void {
+  state.checkers.set(directory, { owner, run, ...(schedule ? { schedule } : {}) });
+}
+
+/**
+ * An instance that has been replaced (the server part reloaded) can still start a watch from a tool call it was
+ * already handling; its own loop is gone, so the watch goes to the loop of the instance that owns the directory now.
+ */
+export function handToOwner(state: ProcessState, directory: string, id: string, delayMs: number): boolean {
+  const checker = state.checkers.get(directory);
+  if (!checker?.schedule || state.owners.get(directory) !== checker.owner) return false;
+  checker.schedule(id, delayMs);
+  return true;
 }
 
 /** Runs every loop's check now, unless that was asked less than 20 seconds ago. Returns whether it ran. */
@@ -72,5 +86,13 @@ export function requestChecks(state: ProcessState, now: number): boolean {
   if (state.lastCheckNowAt !== undefined && now - state.lastCheckNowAt < CHECK_NOW_EVERY_MS) return false;
   state.lastCheckNowAt = now;
   for (const [directory, checker] of state.checkers) if (state.owners.get(directory) === checker.owner) checker.run();
+  return true;
+}
+
+/** Every starting instance sees an orphaned watch; the first directory to claim it takes it over, the rest leave it. */
+export function claimOrphan(state: ProcessState, id: string, directory: string): boolean {
+  const claimed = state.orphans.get(id);
+  if (claimed !== undefined) return claimed === directory;
+  state.orphans.set(id, directory);
   return true;
 }

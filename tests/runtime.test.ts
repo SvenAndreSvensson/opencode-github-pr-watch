@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { claimPolling, dropMessagesFor, newProcessState, onCheckNow, ownsPolling, releasePolling, requestChecks, resumeChanged, shouldAnnounceResume } from "../core/runtime";
+import { claimOrphan, claimPolling, dropMessagesFor, handToOwner, newProcessState, onCheckNow, ownsPolling, releasePolling, requestChecks, resumeChanged, shouldAnnounceResume } from "../core/runtime";
 
 describe("resume announcements", () => {
   test("only the first setup for a directory in a process announces resumed watches", () => {
@@ -92,5 +92,35 @@ describe("check now: the panel's reload asks every poll loop in the process to c
     expect(requestChecks(state, 15_000)).toBe(false);
     expect(requestChecks(state, 21_000)).toBe(true);
     expect(ran).toEqual([1, 1]);
+  });
+});
+
+describe("a watch scheduled by an instance that no longer owns the loop goes to the owner's loop", () => {
+  test("handed to the current owner; the old instance schedules nothing itself", () => {
+    const state = newProcessState();
+    const old = Symbol("old");
+    const current = Symbol("current");
+    const scheduled: string[] = [];
+    claimPolling(state, "/a", old);
+    onCheckNow(state, "/a", old, () => undefined, (id) => scheduled.push(`old ${id}`));
+    claimPolling(state, "/a", current);
+    onCheckNow(state, "/a", current, () => undefined, (id, delay) => scheduled.push(`current ${id} ${delay}`));
+
+    expect(handToOwner(state, "/a", "o/r#1", 0)).toBe(true);
+    expect(scheduled).toEqual(["current o/r#1 0"]);
+  });
+
+  test("no owner yet: nobody to hand it to", () => {
+    expect(handToOwner(newProcessState(), "/a", "o/r#1", 0)).toBe(false);
+  });
+});
+
+describe("orphaned watches: one instance takes each over, not every one that starts", () => {
+  test("the first directory to claim it keeps it; others leave it", () => {
+    const state = newProcessState();
+    expect(claimOrphan(state, "o/r#1", "/a")).toBe(true);
+    expect(claimOrphan(state, "o/r#1", "/b")).toBe(false);
+    expect(claimOrphan(state, "o/r#1", "/a")).toBe(true);
+    expect(claimOrphan(state, "o/r#2", "/b")).toBe(true);
   });
 });

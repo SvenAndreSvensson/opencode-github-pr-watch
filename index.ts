@@ -19,7 +19,7 @@ import { matchWorkflow, parseRole, rolePrompt, type WorkflowRole } from "./core/
 import { configureGh, myMergedPrs, myOpenPrs, setGithubDebug, workflowSummary, type RoleLookup, currentBranchPrUrl, failureExcerpt, runFailureExcerpt, runSnapshot, viewRun, runningPipelines, runProgress, workflowDurations, parsePrReference, prForRun, prSnapshot, resolveRepo, runGh } from "./core/github";
 import { findBranchUpdates, findPrMerges, findRunReruns , alreadyUpToDate , findBotRefreshes } from "./core/merge-detection";
 import { formatWatch } from "./core/listing";
-import { claimPolling, dropMessagesFor, onCheckNow, ownsPolling, processState, releasePolling, requestChecks, resumeChanged, shouldAnnounceResume } from "./core/runtime";
+import { claimOrphan, claimPolling, dropMessagesFor, handToOwner, onCheckNow, ownsPolling, processState, releasePolling, requestChecks, resumeChanged, shouldAnnounceResume } from "./core/runtime";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { notificationCommands } from "./core/desktop-notification";
@@ -393,9 +393,14 @@ export default Plugin.define({
     const shared = processState();
     const owner = Symbol(directory);
     const timers = claimPolling(shared, directory, owner);
-    onCheckNow(shared, directory, owner, () => {
-      for (const id of [...timers.keys()]) schedule(id, 0);
-    });
+    // Every stored watch of the directory, not only those with a timer, so a watch that missed its loop is picked up.
+    onCheckNow(
+      shared,
+      directory,
+      owner,
+      () => void tolerate(debug, "check now", directoryWatches().then((watches) => watches.forEach((w) => schedule(w.id, 0))), undefined),
+      (id, delayMs) => schedule(id, delayMs),
+    );
     const owning = () => ownsPolling(shared, directory, owner);
 
     const topicCache = new Map<string, Promise<Topic[]>>();
@@ -569,7 +574,10 @@ export default Plugin.define({
 
     // Each check decides when the next one runs: every minute while things move, less often while waiting on people.
     const schedule = (id: string, delayMs: number) => {
-      if (!owning()) return;
+      if (!owning()) {
+        if (handToOwner(shared, directory, id, delayMs)) debug("handed-to-owner", { id, directory });
+        return;
+      }
       clearTimeout(timers.get(id));
       timers.set(id, setTimeout(() => void step(id), delayMs));
     };
@@ -624,7 +632,7 @@ export default Plugin.define({
       const now = Date.now();
       return (await scanAll(KEY_PREFIX))
         .map((e) => e.value as unknown as Watch)
-        .filter((w) => w.pinned.directory === directory || isOrphaned(w, directory, now));
+        .filter((w) => w.pinned.directory === directory || (isOrphaned(w, directory, now) && claimOrphan(shared, w.id, directory)));
     };
 
     // Every setup (OpenCode runs it again per instance and reload) restarts the poll loop it now owns, but only the
