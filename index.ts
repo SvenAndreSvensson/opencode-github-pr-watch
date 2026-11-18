@@ -8,7 +8,7 @@ import { automaticStartAllowed, dropUnwatched, freshTrigger, isOrphaned, keepExi
 import { PrWatch } from "./rpc";
 import { sessionGroups, watchRows } from "./core/watch-rows";
 import type { MyPr } from "./core/my-prs";
-import { parseTopics, prID, topicsPrompt, type Topic } from "./core/topics";
+import { parsePlacements, parseTopics, placePrompt, prID, topicPlan, topicsPrompt, type Topic } from "./core/topics";
 import { alignedDelay } from "./core/policy";
 import { GH_MISSING, noWatchMessage } from "./core/gh-binary";
 import { parseReplacement, replacementPrompt, type Candidate } from "./core/replacement";
@@ -399,6 +399,8 @@ export default Plugin.define({
     const owning = () => ownsPolling(shared, directory, owner);
 
     const topicCache = new Map<string, Promise<Topic[]>>();
+    // The last topics made with each model: new PRs join them rather than starting a whole new grouping.
+    const lastTopics = new Map<string, readonly Topic[]>();
     const searches = new Map<string, { at: number; prs: Promise<MyPr[]> }>();
     const cachedSearch = (key: string, search: () => Promise<MyPr[]>) => {
       const cached = searches.get(key);
@@ -473,14 +475,25 @@ export default Plugin.define({
         if (!pin.ok) throw new Error(`no topics: ${pin.reason}`);
         const judge = resolveJudgeModel({ pinned: pin.pinned, session, pluginDirectory: directory, catalog: await ports.catalog(), preferences: settings.preferences });
         if (!judge.ok) throw new Error(`no topics: ${judge.reason}`);
-        const key = `${judge.model.providerID}/${judge.model.id}:${prs.map(prID).sort().join(",")}`;
+        const modelKey = `${judge.model.providerID}/${judge.model.id}`;
+        const key = `${modelKey}:${prs.map(prID).sort().join(",")}`;
         const cached = topicCache.get(key);
         if (cached) return { topics: await cached };
+        const plan = topicPlan(lastTopics.get(modelKey), prs);
+        const ask = (prompt: string) => ctx.generate.text({ prompt, model: { providerID: judge.model.providerID, id: judge.model.id } });
         const topics = (async () => {
-          const answer = await ctx.generate.text({ prompt: topicsPrompt(prs), model: { providerID: judge.model.providerID, id: judge.model.id } });
-          const parsed = parseTopics(answer.text, prs, badAnswer("topics", judge.model, answer.text, { sessionID }));
-          debug("topics", { sessionID, model: `${judge.model.providerID}/${judge.model.id}`, prs: prs.length, topics: parsed.map((t) => `${t.name} (${t.prs.length})`) });
-          return parsed;
+          let made: Topic[];
+          if (plan.kind === "same") made = [...plan.topics];
+          else if (plan.kind === "place") {
+            const answer = await ask(placePrompt(plan.kept, plan.fresh));
+            made = parsePlacements(answer.text, plan.kept, plan.fresh, badAnswer("topic placements", judge.model, answer.text, { sessionID }));
+          } else {
+            const answer = await ask(topicsPrompt(prs));
+            made = parseTopics(answer.text, prs, badAnswer("topics", judge.model, answer.text, { sessionID }));
+          }
+          lastTopics.set(modelKey, made);
+          debug("topics", { sessionID, model: modelKey, plan: plan.kind, prs: prs.length, ...(plan.kind === "place" ? { placed: plan.fresh.map(prID) } : {}), topics: made.map((t) => `${t.name} (${t.prs.length})`) });
+          return made;
         })();
         topicCache.set(key, topics);
         // A failed answer isn't kept: the next ask tries again.

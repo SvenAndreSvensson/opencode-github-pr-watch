@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { byTopic, parseTopics, topicsPrompt } from "../core/topics";
+import { byTopic, parsePlacements, parseTopics, placePrompt, topicPlan, topicsPrompt } from "../core/topics";
 import type { MyPr } from "../core/my-prs";
 
 const pr = (repo: string, number: number, title: string, extra: Partial<MyPr> = {}): MyPr => ({
@@ -53,5 +53,44 @@ describe("byTopic", () => {
 
   test("a PR the topics don't know yet (new since classifying) goes to Other", () => {
     expect(byTopic(prs, [{ name: "Security", prs: ["o/infra#803"] }]).map((g) => g.name)).toEqual(["Security", "Other"]);
+  });
+});
+
+describe("new PRs join the existing topics instead of a whole new grouping", () => {
+  const p = (n: number, title = `PR ${n}`): MyPr => ({ repo: "o/r", number: n, title, url: "u", draft: false, createdAt: "2026-11-10T10:00:00Z" });
+  const topics = [{ name: "CI", prs: ["o/r#1", "o/r#2"] }, { name: "Docs", prs: ["o/r#3"] }];
+
+  test("the same PRs: the topics as they are", () => {
+    expect(topicPlan(topics, [p(1), p(2), p(3)])).toEqual({ kind: "same", topics });
+  });
+
+  test("PRs gone: dropped, and a topic left empty goes", () => {
+    expect(topicPlan(topics, [p(1), p(2)])).toEqual({ kind: "same", topics: [{ name: "CI", prs: ["o/r#1", "o/r#2"] }] });
+  });
+
+  test("new PRs: only they are placed, into the kept topics", () => {
+    expect(topicPlan(topics, [p(1), p(3), p(4)])).toEqual({ kind: "place", kept: [{ name: "CI", prs: ["o/r#1"] }, { name: "Docs", prs: ["o/r#3"] }], fresh: [p(4)] });
+  });
+
+  test("no topics yet, or most PRs new: a whole new grouping", () => {
+    expect(topicPlan(undefined, [p(1)])).toEqual({ kind: "full" });
+    expect(topicPlan(topics, [p(1), p(4), p(5), p(6)])).toEqual({ kind: "full" });
+  });
+
+  test("the model's placements: an existing topic, a new one, or Other when it says nothing usable", () => {
+    const kept = [{ name: "CI", prs: ["o/r#1"] }, { name: "Other", prs: ["o/r#9"] }];
+    const answer = JSON.stringify({ placements: [{ pr: "o/r#4", topic: "ci" }, { pr: "o/r#5", topic: "Security" }, { pr: "o/x#1", topic: "CI" }] });
+    expect(parsePlacements(answer, kept, [p(4), p(5), p(6)])).toEqual([
+      { name: "CI", prs: ["o/r#1", "o/r#4"] },
+      { name: "Security", prs: ["o/r#5"] },
+      { name: "Other", prs: ["o/r#9", "o/r#6"] },
+    ]);
+  });
+
+  test("the prompt lists the topics and only the new PRs", () => {
+    const prompt = placePrompt([{ name: "CI", prs: ["o/r#1"] }], [p(4, "Fix lint")]);
+    expect(prompt).toContain("- CI");
+    expect(prompt).toContain("o/r#4: Fix lint");
+    expect(prompt).not.toContain("o/r#1:");
   });
 });
