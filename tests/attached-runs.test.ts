@@ -62,3 +62,17 @@ describe("in the PR watch", () => {
     expect(keptRuns([9, 10, 11], [attachedRun(run()), attachedRun(run({ databaseId: 10, status: "completed", conclusion: "success" }))])).toEqual([9, 11]);
   });
 });
+
+describe("rows say whose PR it is and where it is, so the panel can list it like the PRs it searched", () => {
+  test("author, state and draft from the facts", () => {
+    const watch = aWatch({ lastFacts: aFacts({ author: "me", state: "MERGED", draft: true }) });
+    const [row] = watchRows([watch], watch.sessionID, 0);
+    expect([row!.author, row!.state, row!.draft]).toEqual(["me", "MERGED", true]);
+  });
+
+  test("nothing when the PR hasn't been read yet", () => {
+    const watch = aWatch({ lastFacts: undefined });
+    const [row] = watchRows([watch], watch.sessionID, 0);
+    expect([row!.author, row!.state, row!.draft]).toEqual([undefined, undefined, undefined]);
+  });
+});

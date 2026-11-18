@@ -13,7 +13,7 @@ const choices = (overrides: Partial<PrsChoices> = {}): PrsChoices => ({
 const data = {
   open: [pr("o/b", 1), pr("o/a", 2, { draft: true }), pr("x/c", 3)],
   merged: [pr("o/a", 9, { closedAt: "2026-11-15T10:00:00Z" })],
-  watchedRows: [row("o/a#2", "s1"), row("bot/dep#7", "s2"), row("o/a run 5", "s1")],
+  rows: [row("o/a#2", "s1"), row("bot/dep#7", "s2"), row("o/a run 5", "s1")],
 };
 const numbers = (groups: readonly { prs: readonly MyPr[] }[]) => groups.flatMap((g) => g.prs.map((p) => p.number));
 
@@ -35,11 +35,11 @@ describe("prsView: what the PRs tab shows", () => {
     const view = prsView(data, choices({ sessionOnly: true }), "s2");
     expect(numbers(view.open)).toEqual([7]);
     expect(view.runs).toEqual([]);
-    expect(prsView({ ...data, watchedRows: [] }, choices({ sessionOnly: true }), "s2").openEmpty).toBe("No PRs watched in this session.");
+    expect(prsView({ ...data, rows: [] }, choices({ sessionOnly: true }), "s2").openEmpty).toBe("No PRs watched in this session.");
   });
 
   test("current session only, without others' PRs: only my PRs this session watches", () => {
-    const view = prsView({ ...data, watchedRows: [...data.watchedRows, row("bot/dep#7", "s1")] }, choices({ sessionOnly: true, others: false }), "s1");
+    const view = prsView({ ...data, rows: [...data.rows, row("bot/dep#7", "s1")] }, choices({ sessionOnly: true, others: false }), "s1");
     expect(numbers(view.open)).toEqual([2]);
   });
 
@@ -67,7 +67,7 @@ describe("prsView: what the PRs tab shows", () => {
   });
 
   test("empty texts say why", () => {
-    expect(prsView({ open: [], watchedRows: [] }, choices(), "s1").openEmpty).toBe("No open PRs.");
+    expect(prsView({ open: [], rows: [] }, choices(), "s1").openEmpty).toBe("No open PRs.");
     expect(prsView(data, choices({ search: "zzz" }), "s1").openEmpty).toBe("No open PRs match.");
     expect(prsView(data, choices(), "s1").openEmpty).toBeUndefined();
   });
@@ -79,6 +79,30 @@ describe("prsView: what the PRs tab shows", () => {
   test("a PR's watch row, if watched", () => {
     expect(prsView(data, choices(), "s1").watchOf(pr("o/a", 2))?.sessionID).toBe("s1");
     expect(prsView(data, choices(), "s1").watchOf(pr("o/b", 1))).toBeUndefined();
+  });
+});
+
+describe("watched PRs come from their rows, with their real author", () => {
+  const mine = (id: string, extra: Record<string, unknown> = {}) => row(id, "s1", { author: "me", state: "OPEN", tone: "waiting", ...extra });
+
+  test("others' PRs only with 'Show PRs that aren't mine'; mine always, even when the search hasn't found them yet", () => {
+    const data2 = { open: [], rows: [mine("o/a#5"), row("bot/dep#7", "s1", { author: "bot", state: "OPEN" })], me: "me" };
+    expect(numbers(prsView(data2, choices({ others: false }), "s1").open)).toEqual([5]);
+    expect(numbers(prsView(data2, choices(), "s1").open)).toEqual([7, 5]);
+  });
+
+  test("a merged PR still on its way stays with the open ones, not under recently merged; once done it moves there", () => {
+    const merged = [pr("o/a", 9, { closedAt: "2026-11-15T10:00:00Z" })];
+    const going = { open: [], merged, rows: [mine("o/a#9", { state: "MERGED", tone: "pending" })], me: "me" };
+    expect(numbers(prsView(going, choices(), "s1").open)).toEqual([9]);
+    expect(prsView(going, choices(), "s1").merged).toEqual([]);
+    const done = { ...going, rows: [mine("o/a#9", { state: "MERGED", tone: "done" })] };
+    expect(prsView(done, choices(), "s1").open).toEqual([]);
+    expect(numbers(prsView(done, choices(), "s1").merged!)).toEqual([9]);
+  });
+
+  test("closed PRs aren't listed as open", () => {
+    expect(prsView({ open: [], rows: [mine("o/a#5", { state: "CLOSED" })], me: "me" }, choices(), "s1").open).toEqual([]);
   });
 });
 
@@ -114,7 +138,7 @@ describe("statuses: what a line's watch says about it", () => {
       row("bot/dep#7", "s2", { tone: "failed" }),
       row("o/a run 5", "s1", { tone: "pending" }),
     ];
-    const both = { ...data, watchedRows: rows };
+    const both = { ...data, rows: rows };
     expect(numbers(prsView(both, choices({ statuses: ["review"] }), "s1").open)).toEqual([2]);
     expect(numbers(prsView(both, choices({ statuses: ["needs-me", "unwatched"] }), "s1").open)).toEqual([7, 1, 3]);
     expect(prsView(both, choices({ statuses: ["review"] }), "s1").runs).toEqual([]);

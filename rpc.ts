@@ -13,6 +13,9 @@ const row = {
     notify: { type: "string", enum: ["major", "all"] },
     sessionID: { type: "string" },
     sessionTitle: { type: "string" },
+    author: { type: "string" },
+    state: { type: "string", enum: ["OPEN", "MERGED", "CLOSED"] },
+    draft: { type: "boolean" },
     runLinks: {
       type: "array",
       items: { type: "object", properties: { label: { type: "string" }, url: { type: "string" } }, required: ["label", "url"], additionalProperties: false },
@@ -110,6 +113,15 @@ export const PrWatch = Rpc.define({
       output: { type: "object", additionalProperties: false },
     },
     // Every watch checks GitHub now, instead of at its next turn; ignored if asked within the last 20 seconds.
+    watches: {
+      input: { type: "object", additionalProperties: false },
+      output: {
+        type: "object",
+        properties: { rows: { type: "array", items: row }, me: { type: "string" } },
+        required: ["rows"],
+        additionalProperties: false,
+      },
+    },
     checkNow: {
       input: { type: "object", additionalProperties: false },
       output: { type: "object", properties: { checking: { type: "boolean" } }, required: ["checking"], additionalProperties: false },
@@ -117,7 +129,13 @@ export const PrWatch = Rpc.define({
   },
   events: {
     changed: {
-      schema: { type: "object", properties: { sessionID: { type: "string" } }, required: ["sessionID"], additionalProperties: false },
+      // The watch's new row, or no row when it stopped: the GUI patches its store with it.
+      schema: {
+        type: "object",
+        properties: { sessionID: { type: "string" }, id: { type: "string" }, row },
+        required: ["sessionID"],
+        additionalProperties: false,
+      },
     },
   },
 });

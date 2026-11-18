@@ -399,6 +399,13 @@ export default Plugin.define({
     const owning = () => ownsPolling(shared, directory, owner);
 
     const topicCache = new Map<string, Promise<Topic[]>>();
+    // The gh user, to tell their PRs from others' among the watched ones; read once.
+    let login: Promise<string> | undefined;
+    const ghUser = () => {
+      login ??= runGh(["api", "user", "--jq", ".login"], directory).then((text) => text.trim());
+      login.catch(() => (login = undefined));
+      return login;
+    };
     // The last topics made with each model: new PRs join them rather than starting a whole new grouping.
     const lastTopics = new Map<string, readonly Topic[]>();
     const searches = new Map<string, { at: number; prs: Promise<MyPr[]> }>();
@@ -440,6 +447,21 @@ export default Plugin.define({
         const checking = requestChecks(shared, Date.now());
         debug("check-now", { checking });
         return { checking };
+      },
+      // Every session's watches, with the session watching each: the one store the pill and the PRs tab both read.
+      watches: async () => {
+        const { entries } = await ctx.storage.scan({ prefix: KEY_PREFIX });
+        const watches = entries.map((e) => e.value as unknown as Watch);
+        const rows = (
+          await Promise.all(
+            sessionGroups(watches, Date.now()).map(async (group) => {
+              const session = await tolerate(debug, "session title", ctx.session.get({ sessionID: group.sessionID }), undefined, { sessionID: group.sessionID });
+              return group.watches.map((row) => ({ ...row, sessionID: group.sessionID, sessionTitle: session?.title || group.sessionID }));
+            }),
+          )
+        ).flat();
+        const me = await tolerate(debug, "gh user", ghUser(), undefined);
+        return { rows, ...(me ? { me } : {}) };
       },
       myPrs: async (input) => {
         const { merged } = input as { merged?: boolean };
@@ -513,7 +535,7 @@ export default Plugin.define({
         const { notify: _old, ...rest } = watch;
         await ctx.storage.set(KEY_PREFIX + id, (notify === "all" ? { ...rest, notify } : rest) as never);
         debug("notify-set", { id, notify });
-        changed(watch.sessionID);
+        changed(watch.sessionID, id);
         return {};
       },
       unwatch: async (input) => {
@@ -523,14 +545,26 @@ export default Plugin.define({
         return {};
       },
     });
-    const changed = (sessionID: string) => void tolerate(debug, "pill refresh event", registration.events.emit("changed", { sessionID }), undefined);
+    // Tells the GUI one watch changed, with its new row (none when it stopped), so its store patches just that row.
+    const changed = (sessionID: string, id: string) =>
+      void tolerate(
+        debug,
+        "watch change event",
+        (async () => {
+          const watch = (await ctx.storage.get(KEY_PREFIX + id)) as unknown as Watch | undefined;
+          const [row] = watch ? watchRows([watch], watch.sessionID, Date.now()) : [];
+          const session = row ? await tolerate(debug, "session title", ctx.session.get({ sessionID }), undefined, { sessionID }) : undefined;
+          await registration.events.emit("changed", { sessionID, id, ...(row ? { row: { ...row, sessionID, sessionTitle: session?.title || sessionID } } : {}) });
+        })(),
+        undefined,
+      );
 
     const stop = async (id: string) => {
       const stopped = (await ctx.storage.get(KEY_PREFIX + id)) as unknown as Watch | undefined;
       clearTimeout(timers.get(id));
       timers.delete(id);
       await ctx.storage.remove(KEY_PREFIX + id);
-      if (stopped) changed(stopped.sessionID);
+      if (stopped) changed(stopped.sessionID, id);
     };
 
     // Each check decides when the next one runs: every minute while things move, less often while waiting on people.
@@ -565,7 +599,7 @@ export default Plugin.define({
         // The notify setting can be switched from the panel while a check runs; the stored one wins.
         const { notify: _checked, ...checked } = result.watch;
         await ctx.storage.set(KEY_PREFIX + id, (latest?.notify ? { ...checked, notify: latest.notify } : checked) as never);
-        changed(result.watch.sessionID);
+        changed(result.watch.sessionID, id);
         delayMs = result.delayMs > 0 ? alignedDelay(Date.now(), result.delayMs) : result.delayMs;
       } catch (err) {
         // The boundary for a check: whatever failed below, this watch keeps going and tries again shortly.
@@ -680,7 +714,7 @@ export default Plugin.define({
           // The run belongs to a PR this session watches: follow it there instead of in a row of its own.
           if (!target.runs?.includes(runRef.run)) await ctx.storage.set(KEY_PREFIX + target.id, { ...target, runs: [...(target.runs ?? []), runRef.run] } as never);
           if (target.pinned.directory === directory) schedule(target.id, 0);
-          changed(sessionID);
+          changed(sessionID, target.id);
           debug("run-attached", { id: target.id, run: runRef.run, startedBy });
           return { message: `Following run ${runRef.run} in the watch of ${target.id}${startedBy ? ` (started by ${startedBy})` : ""}.` };
         }
@@ -736,7 +770,7 @@ export default Plugin.define({
         return { message: "" };
       }
       await ctx.storage.set(KEY_PREFIX + id, watch as never);
-      changed(sessionID);
+      changed(sessionID, id);
       schedule(id, pollDelay(snapshot.facts, now, watch.awaiting !== undefined));
       const title = snapshot.text.split("\n")[0]!.replace(/^(PR|Run): /, "").replace(/ \(https:\/\/\S+\)$/, "");
       const prefix = replaced ? "Replaced the earlier watch. " : "";

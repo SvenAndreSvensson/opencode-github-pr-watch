@@ -4,8 +4,9 @@ import { ComposerPill, createKeyed, Panel, Plugin, Style, type ComposerPillTone,
 import { PRS_TAB } from "../core/panel-tab";
 import type { MyPr, MyPrSort } from "../core/my-prs";
 import type { Topic } from "../core/topics";
-import { activities as trackActivities, keepMerged, panelOperations, type LoadedPrs, type PanelPort, type PanelSession } from "../core/panel-operations";
-import { DEMO_KEY, demoData, demoPort } from "../core/demo";
+import { activities as trackActivities, panelOperations, type LoadedPrs, type PanelPort, type PanelSession } from "../core/panel-operations";
+import { DEMO_KEY, demoPort } from "../core/demo";
+import { emptyStore, sessionRows, update, type Change, type Store } from "../core/store";
 import { lineDetail, pillView, prOfRow } from "../core/panel-text";
 import { ALL_STATUSES, choiceWrites, prsView, readSessionChoices, STATUS_LABELS, statusSummary, toggleStatus, type Grouping, type PrsChoices } from "../core/prs-view";
 import { PrWatch } from "../rpc";
@@ -44,37 +45,15 @@ const SELECT_STYLE = { flex: "1 1 150px", "min-width": "150px", "box-sizing": "b
 
 export default Plugin.define({
   setup(ctx) {
-    const [watches, setWatches] = createStore<Record<string, readonly Row[]>>({});
-
     const demo = localStorage.getItem(DEMO_KEY) === "true";
-    const load = (sessionID: string) =>
-      demo
-        ? setWatches(sessionID, demoData(sessionID, Date.now()).sessionRows)
-        : void ctx.client
-        .rpc(PrWatch)
-        .list({ sessionID })
-        .then((result) => setWatches(sessionID, (result as { watches: Row[] }).watches))
-        .catch(() => undefined);
-
-    // Load the routed session's watches, and reload them whenever the server part reports a change in that session.
-    createKeyed(
-      () => ctx.sessions.current()?.id,
-      (sessionID) => {
-        load(sessionID);
-        const stop = ctx.client.rpc(PrWatch).events.on("changed", (event) => {
-          if ((event.data as { sessionID: string }).sessionID === sessionID) load(sessionID);
-        });
-        // The event can go quiet when the server part reloads, so the list is also refreshed now and then.
-        const timer = setInterval(() => load(sessionID), 30_000);
-        onCleanup(() => {
-          stop();
-          clearInterval(timer);
-        });
-      },
-    );
+    // The one store the pill and the PRs tab read. It changes only through update(): full refreshes replace its rows
+    // or PR lists, and each watch's change event patches just that watch's row.
+    const [store, setStore] = createSignal<Store<Row>>(emptyStore<Row>());
+    const apply = (change: Change) => setStore((now) => update(now, change as Change<Row>));
 
     const appPort: PanelPort = {
-      myPrs: async (merged) => (await ctx.client.rpc(PrWatch).myPrs({ merged })) as LoadedPrs<Row>,
+      myPrs: async (merged) => (await ctx.client.rpc(PrWatch).myPrs({ merged })) as LoadedPrs,
+      watches: async () => (await ctx.client.rpc(PrWatch).watches({})) as { rows: Row[]; me?: string },
       myPrTopics: async (sessionID, merged) => ((await ctx.client.rpc(PrWatch).myPrTopics({ sessionID, merged })) as { topics: Topic[] }).topics,
       watch: async (sessionID, pr) => ((await ctx.client.rpc(PrWatch).watch({ sessionID, pr })) as { message: string }).message,
       unwatch: async (id) => void (await ctx.client.rpc(PrWatch).unwatch({ id })),
@@ -100,11 +79,23 @@ export default Plugin.define({
       setStatus(text);
       setTimeout(() => setStatus((now) => (now === text ? undefined : now)), 6_000);
     };
-    const ops = panelOperations(port, { track: (text, work) => tracker.track(text, work), say });
+    const ops = panelOperations(port, apply, { track: (text, work) => tracker.track(text, work), say });
+    const refreshWatches = () => void ops.refreshWatches().catch(() => undefined);
+    refreshWatches();
+    const stopEvents = ctx.client.rpc(PrWatch).events.on("changed", (event) => {
+      const data = event.data as { id?: string; row?: Row };
+      if (data.id) apply({ kind: "row", id: data.id, ...(data.row ? { row: data.row } : {}) });
+      else refreshWatches();
+    });
+    // The event can go quiet when the server part reloads, so everything is also read again now and then.
+    const watchesTimer = setInterval(refreshWatches, 30_000);
+    onCleanup(() => {
+      stopEvents();
+      clearInterval(watchesTimer);
+    });
     const refresh = (ok: boolean) => {
       if (!ok) return;
-      const sessionID = ctx.sessions.current()?.id;
-      if (sessionID) load(sessionID);
+      refreshWatches();
       loadMyPrs();
     };
     const setNotify = (id: string, notify: "major" | "all") => void ops.setNotify(id, notify).then(refresh);
@@ -209,9 +200,8 @@ export default Plugin.define({
       );
     };
 
-    // The loaded PR lists live here, not in the view, so switching tabs or sessions shows the last list at once and a
-    // reload replaces it only when the new one has arrived.
-    const [myPrs, setMyPrs] = createSignal<LoadedPrs<Row>>();
+    // The PR lists are in the store, so switching tabs or sessions shows the last list at once, and a reload replaces it
+    // only when the new one has arrived.
     const [myPrsError, setMyPrsError] = createSignal<string>();
     const [myPrsLoading, setMyPrsLoading] = createSignal(0);
     const [showMerged, setShowMerged] = createSignal(false);
@@ -219,11 +209,8 @@ export default Plugin.define({
       const merged = showMerged();
       setMyPrsLoading((n) => n + 1);
       void ops
-        .loadPrs(merged)
-        .then((loaded) => {
-          setMyPrs((before) => keepMerged(before, loaded as LoadedPrs<Row>, merged));
-          setMyPrsError(undefined);
-        })
+        .refreshPrs(merged)
+        .then(() => setMyPrsError(undefined))
         .catch((err: unknown) => setMyPrsError(err instanceof Error ? err.message : String(err)))
         .finally(() => setMyPrsLoading((n) => n - 1));
     };
@@ -254,7 +241,6 @@ export default Plugin.define({
     // The gh user's open PRs, grouped by repo or topic, for the organisation picked in the dropdown, and on request the
     // PRs merged in the last 7 days.
     const MyPrsView = (props: { readonly session: { readonly id: string; readonly directory: string; readonly server: { readonly id: string } } }): JSX.Element => {
-      const data = myPrs;
       const error = myPrsError;
       const load = () => {
         loadMyPrs();
@@ -262,12 +248,12 @@ export default Plugin.define({
       };
       const choices = () => choicesFor(props.session.id);
       const choose = <K extends keyof PrsChoices>(key: K, value: PrsChoices[K]) => chooseFor(props.session.id, key, value);
-      const view = () => prsView(data() ?? { open: [], watchedRows: [] }, choices(), props.session.id, topics());
+      const view = () => prsView(store(), choices(), props.session.id, topics());
       const openSession = (row: Row) => () => port.openSession(props.session.server.id, row.sessionID!);
       let statusMenu: HTMLDetailsElement | undefined;
       onMount(() => {
         load();
-        const stop = ctx.client.rpc(PrWatch).events.on("changed", () => load());
+        // Watches update the store as they change; the PR search is refreshed on a timer and on reload.
         const timer = setInterval(load, 3 * 60_000);
         // The status dropdown is a <details>, which only closes on its own button: a click outside or Escape closes it too.
         const closeOutside = (event: PointerEvent) => {
@@ -279,7 +265,6 @@ export default Plugin.define({
         document.addEventListener("pointerdown", closeOutside);
         document.addEventListener("keydown", closeOnEscape);
         onCleanup(() => {
-          stop();
           clearInterval(timer);
           document.removeEventListener("pointerdown", closeOutside);
           document.removeEventListener("keydown", closeOnEscape);
@@ -453,7 +438,7 @@ export default Plugin.define({
           <Show when={choices().grouping === "topic" && topicsError()}>
             {(text) => <div style={{ opacity: "0.8", "font-size": "12px" }}>Grouped by repo: {text()}</div>}
           </Show>
-          <Show when={data()} fallback={<div style={{ opacity: "0.6" }}>Loading…</div>}>
+          <Show when={store().open !== undefined || store().rowsLoaded} fallback={<div style={{ opacity: "0.6" }}>Loading…</div>}>
             {(_) => (
               <>
                 <Show when={view().runs.length > 0}>
@@ -527,7 +512,7 @@ export default Plugin.define({
     ctx.add(ComposerPill, {
       id: "watches",
       show: (input) => {
-        const pill = pillView(watches[input.session.id] ?? []);
+        const pill = pillView(sessionRows(store().rows, input.session.id));
         if (!pill) return undefined;
         return {
           icon: "github",
@@ -539,7 +524,7 @@ export default Plugin.define({
       // One line per PR: where it is, with buttons that open the PR and the run it's waiting on in the browser.
       menu: (input) => (
         <div style={{ display: "flex", "flex-direction": "column", gap: "6px", padding: "4px 0", width: "100%", "box-sizing": "border-box", "max-height": "min(480px, 60vh)", "overflow-y": "auto", "padding-right": "4px" }}>
-          <Index each={watches[input.session.id] ?? []}>{(row) => <WatchLine row={row()} session={input.session} />}</Index>
+          <Index each={sessionRows(store().rows, input.session.id)}>{(row) => <WatchLine row={row()} session={input.session} />}</Index>
         </div>
       ),
     });

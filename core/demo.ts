@@ -19,13 +19,15 @@ export interface DemoRow {
   readonly notify?: "major" | "all";
   readonly sessionID?: string;
   readonly sessionTitle?: string;
+  readonly author?: string;
+  readonly state?: "OPEN" | "MERGED" | "CLOSED";
 }
 
 const DAY = 86_400_000;
 const ago = (now: number, days: number) => new Date(now - days * DAY).toISOString();
 const url = (repo: string, n: number) => `https://github.com/${repo}/pull/${n}`;
 
-export function demoData(sessionID: string, now: number): LoadedPrs<DemoRow> & { readonly sessionRows: readonly DemoRow[] } {
+export function demoData(sessionID: string, now: number): LoadedPrs & { readonly rows: readonly DemoRow[]; readonly sessionRows: readonly DemoRow[]; readonly me: string } {
   const pr = (repo: string, number: number, title: string, days: number, extra: Partial<MyPr> = {}): MyPr => ({
     repo, number, title, url: url(repo, number), draft: false, createdAt: ago(now, days), ...extra,
   });
@@ -43,17 +45,17 @@ export function demoData(sessionID: string, now: number): LoadedPrs<DemoRow> & {
   ];
   const here = { sessionID, sessionTitle: "Checkout work" };
   const sessionRows: DemoRow[] = [
-    { id: "acme/shop#412", label: "acme/shop#412 Add gift cards to checkout", url: url("acme/shop", 412), detail: "deploying 3/5 · prod", tone: "pending", runUrl: "https://github.com/acme/shop/actions/runs/1", notify: "all", ...here },
-    { id: "acme/api#77", label: "acme/api#77 Rate limit the public endpoints", url: url("acme/api", 77), detail: "waiting for code review", tone: "waiting", ...here },
-    { id: "acme/api#81", label: "acme/api#81 Upgrade the web framework", url: url("acme/api", 81), detail: "checks failed: integration-tests", tone: "failed", runUrl: "https://github.com/acme/api/actions/runs/2", ...here },
+    { id: "acme/shop#412", label: "acme/shop#412 Add gift cards to checkout", url: url("acme/shop", 412), detail: "deploying 3/5 · prod", tone: "pending", runUrl: "https://github.com/acme/shop/actions/runs/1", notify: "all", author: "demo", state: "OPEN", ...here },
+    { id: "acme/api#77", label: "acme/api#77 Rate limit the public endpoints", url: url("acme/api", 77), detail: "waiting for code review", tone: "waiting", author: "demo", state: "OPEN", ...here },
+    { id: "acme/api#81", label: "acme/api#81 Upgrade the web framework", url: url("acme/api", 81), detail: "checks failed: integration-tests", tone: "failed", runUrl: "https://github.com/acme/api/actions/runs/2", author: "demo", state: "OPEN", ...here },
   ];
-  const watchedRows: DemoRow[] = [
+  const rows: DemoRow[] = [
     ...sessionRows,
-    { id: "acme/infra#23", label: "acme/infra#23 Move the database to the new region", url: url("acme/infra", 23), detail: "ready for merge", tone: "done", sessionID: "ses_other", sessionTitle: "Database move" },
-    { id: "acme/shop#420", label: "acme/shop#420 Bump the image library from 4.1 to 4.2", url: url("acme/shop", 420), detail: "checks running 4/6", tone: "pending", sessionID: "ses_other", sessionTitle: "Dependency updates" },
+    { id: "acme/infra#23", label: "acme/infra#23 Move the database to the new region", url: url("acme/infra", 23), detail: "ready for merge", tone: "done", author: "demo", state: "OPEN", sessionID: "ses_other", sessionTitle: "Database move" },
+    { id: "acme/shop#420", label: "acme/shop#420 Bump the image library from 4.1 to 4.2", url: url("acme/shop", 420), detail: "checks running 4/6", tone: "pending", author: "dependabot", state: "OPEN", sessionID: "ses_other", sessionTitle: "Dependency updates" },
     { id: "acme/shop run 9001", label: "acme/shop run 9001 Nightly end-to-end tests", url: "https://github.com/acme/shop/actions/runs/9001", detail: "running 12/20 jobs", tone: "pending", runUrl: "https://github.com/acme/shop/actions/runs/9001", ...here },
   ];
-  return { open, merged, watchedRows, sessionRows };
+  return { open, merged, rows, sessionRows, me: "demo" };
 }
 
 /** A port that serves the demo data and accepts every action without doing anything. */
@@ -61,7 +63,11 @@ export function demoPort(sessionID: () => string, now: () => number): PanelPort 
   return {
     myPrs: async (merged) => {
       const data = demoData(sessionID(), now());
-      return { open: data.open, watchedRows: data.watchedRows, ...(merged ? { merged: data.merged } : {}) };
+      return { open: data.open, ...(merged ? { merged: data.merged } : {}) };
+    },
+    watches: async () => {
+      const data = demoData(sessionID(), now());
+      return { rows: data.rows, me: data.me };
     },
     myPrTopics: async () => [
       { name: "Checkout", prs: ["acme/shop#412", "acme/shop#399", "acme/shop#405"] },

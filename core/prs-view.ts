@@ -1,4 +1,4 @@
-import { allPrs, byRepo, matchesSearch, organisationsOf, runWatches, watchedIn, withWatchedPrs, type MyPr, type MyPrSort } from "./my-prs";
+import { allPrs, byRepo, matchesSearch, organisationsOf, runWatches, watchedIn, type MyPr, type MyPrSort } from "./my-prs";
 import { byTopic, type Topic } from "./topics";
 
 /**
@@ -57,13 +57,20 @@ export interface WatchRowLike {
   readonly sessionID?: string;
   readonly tone?: string;
   readonly waitingFor?: string;
+  readonly author?: string;
+  readonly state?: string;
+  readonly draft?: boolean;
 }
 
+/** The store's data (see store.ts): every session's watches, and the gh user's PRs as searched. */
 export interface PrsData<R extends WatchRowLike> {
-  readonly open: readonly MyPr[];
+  /** Absent until searched. */
+  readonly open?: readonly MyPr[];
   /** Absent until the recently merged list has been loaded. */
   readonly merged?: readonly MyPr[];
-  readonly watchedRows: readonly R[];
+  readonly rows: readonly R[];
+  /** The gh user; without it, a watched PR counts as theirs only when the search found it. */
+  readonly me?: string;
 }
 
 export interface PrGroup {
@@ -88,11 +95,24 @@ export interface PrsView<R extends WatchRowLike> {
 }
 
 export function prsView<R extends WatchRowLike>(data: PrsData<R>, choices: PrsChoices, sessionID: string, topics?: readonly Topic[]): PrsView<R> {
-  const rows = data.watchedRows;
-  // My PRs, plus others' watched ones when shown; with "current session only", just those this session watches.
-  const listed = choices.others ? withWatchedPrs(data.open, rows) : [...data.open];
+  const rows = data.rows;
+  const searched = data.open ?? [];
+  const found = new Set(searched.map(idOf));
+  const mine = (row: R) => (data.me ? row.author === data.me : found.has(row.id));
+  // Watched PRs the search didn't list: others' (when shown), and merged ones still on their way (deploying, waiting
+  // for approval), which stay with the open ones until their watch is done.
+  const watchedExtra = rows.filter(
+    (row) =>
+      PR_ROW.test(row.id) && !found.has(row.id) &&
+      (row.state === "MERGED" ? row.tone !== "done" : row.state !== "CLOSED") &&
+      (mine(row) || choices.others),
+  );
+  const listed = [...searched, ...watchedExtra.map(prOfWatch)];
+  const shownOpen = new Set(listed.map(idOf));
+  // With "current session only", just the PRs this session watches.
   const open = choices.sessionOnly ? watchedIn(listed, rows, sessionID) : listed;
-  const merged = data.merged && (choices.sessionOnly ? watchedIn(data.merged, rows, sessionID) : data.merged);
+  const recent = data.merged?.filter((pr) => !shownOpen.has(idOf(pr)));
+  const merged = recent && (choices.sessionOnly ? watchedIn(recent, rows, sessionID) : recent);
   const byTopicNow = choices.grouping === "topic" && topics !== undefined;
   const effectiveSort: MyPrSort = choices.grouping === "topic" && choices.sort === "name" ? "newest" : choices.sort;
   const organisation = choices.organisation || undefined;
@@ -179,4 +199,13 @@ function readStatuses(stored: string | null): readonly Status[] {
   if (stored === null) return ALL_STATUSES;
   const chosen = stored.split(",");
   return ALL_STATUSES.filter((status) => chosen.includes(status));
+}
+
+const PR_ROW = /^(.+)#(\d+)$/;
+const idOf = (pr: MyPr) => `${pr.repo}#${pr.number}`;
+
+/** A watched PR as a list entry, from its row: the watch knows no opening date. */
+function prOfWatch(row: WatchRowLike): MyPr {
+  const [, repo, number] = row.id.match(PR_ROW)!;
+  return { repo: repo!, number: Number(number), title: row.label.slice(row.id.length + 1), url: row.url, draft: row.draft ?? false, createdAt: "" };
 }

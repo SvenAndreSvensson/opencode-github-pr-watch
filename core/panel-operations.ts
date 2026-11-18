@@ -1,5 +1,7 @@
 import { prList, prSessionPrompt, type MyPr } from "./my-prs";
 import type { Topic } from "./topics";
+import type { Change } from "./store";
+import type { WatchRowLike } from "./prs-view";
 
 /**
  * Everything the pill and the PRs tab do, apart from rendering: each operation calls the app through the port, reports
@@ -7,6 +9,8 @@ import type { Topic } from "./topics";
  */
 export interface PanelPort {
   myPrs(merged: boolean): Promise<LoadedPrs>;
+  /** Every session's watches, and the gh user. */
+  watches(): Promise<{ readonly rows: readonly WatchRowLike[]; readonly me?: string }>;
   myPrTopics(sessionID: string, merged: boolean): Promise<readonly Topic[]>;
   watch(sessionID: string, pr: string): Promise<string>;
   unwatch(id: string): Promise<void>;
@@ -27,10 +31,9 @@ export interface Feedback {
   say(text: string): void;
 }
 
-export interface LoadedPrs<R = unknown> {
+export interface LoadedPrs {
   readonly open: readonly MyPr[];
   readonly merged?: readonly MyPr[];
-  readonly watchedRows: readonly R[];
 }
 
 export interface PanelSession {
@@ -41,7 +44,7 @@ export interface PanelSession {
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-export function panelOperations(port: PanelPort, feedback: Feedback) {
+export function panelOperations(port: PanelPort, apply: (change: Change) => void, feedback: Feedback) {
   const { track, say } = feedback;
   // An action reports its own failure and returns false, so a click never leaves an unhandled error behind.
   const act = async (work: () => Promise<void>, failure: string): Promise<boolean> => {
@@ -55,8 +58,16 @@ export function panelOperations(port: PanelPort, feedback: Feedback) {
   };
 
   return {
-    /** Loads throw: the list shows the error where it would have been. */
-    loadPrs: (merged: boolean) => track("Loading your PRs…", port.myPrs(merged)),
+    /** Full refreshes put what they read into the store; they throw, so the tab can show the error. */
+    refreshWatches: async () => {
+      const { rows, me } = await port.watches();
+      apply({ kind: "rows", rows });
+      if (me) apply({ kind: "me", me });
+    },
+    refreshPrs: async (merged: boolean) => {
+      const loaded = await track("Loading your PRs…", port.myPrs(merged));
+      apply({ kind: "prs", open: loaded.open, ...(merged && loaded.merged ? { merged: loaded.merged } : {}) });
+    },
     loadTopics: (sessionID: string, merged: boolean, hasTopics: boolean) =>
       track(hasTopics ? "Updating the topics…" : "Sorting your PRs into topics…", port.myPrTopics(sessionID, merged)),
 
@@ -105,12 +116,6 @@ export function panelOperations(port: PanelPort, feedback: Feedback) {
 }
 
 export type PanelOperations = ReturnType<typeof panelOperations>;
-
-/** A load that didn't ask for the merged list keeps the one shown before, for the next time it is expanded. */
-export function keepMerged<R>(before: LoadedPrs<R> | undefined, loaded: LoadedPrs<R>, mergedRequested: boolean): LoadedPrs<R> {
-  const merged = mergedRequested ? loaded.merged : before?.merged;
-  return { open: loaded.open, watchedRows: loaded.watchedRows, ...(merged ? { merged } : {}) };
-}
 
 /** The work in progress, in the order it started; `onChange` gets the texts whenever one starts or settles. */
 export function activities(onChange: (texts: string[]) => void) {

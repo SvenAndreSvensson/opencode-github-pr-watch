@@ -10,7 +10,7 @@ describe("watchRows", () => {
     const other = { ...aWatch(), id: "o/r#8", sessionID: "s2" };
 
     expect(watchRows([watch, other], "s1", NOW)).toEqual([
-      { id: "o/r#7", notify: "major", label: "o/r#7 Bump foo", url: "https://github.com/o/r/pull/7", detail: "checks running", tone: "pending" },
+      { id: "o/r#7", notify: "major", label: "o/r#7 Bump foo", url: "https://github.com/o/r/pull/7", detail: "checks running", tone: "pending", state: "OPEN" },
     ]);
   });
 

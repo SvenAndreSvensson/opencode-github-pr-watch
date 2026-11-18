@@ -18,6 +18,10 @@ export interface WatchRow {
   readonly runLinks?: readonly { readonly label: string; readonly url: string }[];
   /** What the watch reports: each change of step, or progress within a step too. */
   readonly notify: "major" | "all";
+  /** The PR's author, state and draft flag, from the last check; absent before the first one. */
+  readonly author?: string;
+  readonly state?: "OPEN" | "MERGED" | "CLOSED";
+  readonly draft?: boolean;
 }
 
 // "3/4 · DEPLOY - Prod" while going, ", 4 steps done" once all of them are.
@@ -105,6 +109,9 @@ export function watchRows(watches: readonly Watch[], sessionID: string, now: num
       return {
         id: watch.id,
         notify: watch.notify ?? "major",
+        ...(watch.lastFacts?.author ? { author: watch.lastFacts.author } : {}),
+        ...(watch.lastFacts && ["OPEN", "MERGED", "CLOSED"].includes(watch.lastFacts.state) ? { state: watch.lastFacts.state as "OPEN" | "MERGED" | "CLOSED" } : {}),
+        ...(watch.lastFacts?.draft ? { draft: true } : {}),
         label: title ? `${watch.id} ${title}` : watch.id,
         url: watch.run ? `https://github.com/${watch.repo}/actions/runs/${watch.run}` : `https://github.com/${watch.repo}/pull/${watch.pr}`,
         detail: approving

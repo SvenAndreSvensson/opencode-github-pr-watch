@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { activities, keepMerged, panelOperations, type PanelPort } from "../core/panel-operations";
+import { activities, panelOperations, type PanelPort } from "../core/panel-operations";
+import type { Change } from "../core/store";
 import type { MyPr } from "../core/my-prs";
 
 const pr = (repo: string, number: number): MyPr => ({ repo, number, title: `Fix ${number}`, url: `https://github.com/${repo}/pull/${number}`, draft: false, createdAt: "2026-11-10T10:00:00Z" });
@@ -15,6 +16,10 @@ class FakePort implements PanelPort {
   async myPrs(merged: boolean) {
     this.fail(`myPrs merged=${merged}`);
     return { open: [pr("o/r", 1)], merged: merged ? [pr("o/r", 2)] : [], watchedRows: [] };
+  }
+  async watches() {
+    this.fail("watches");
+    return { rows: [{ id: "o/r#1", label: "o/r#1 Fix 1", url: "u", detail: "x", tone: "pending" as const }], me: "me" };
   }
   async myPrTopics(sessionID: string, merged: boolean) {
     this.fail(`myPrTopics ${sessionID} merged=${merged}`);
@@ -47,14 +52,15 @@ class FakePort implements PanelPort {
 const setup = () => {
   const port = new FakePort();
   const log: string[] = [];
-  const ops = panelOperations(port, {
+  const changes: Change[] = [];
+  const ops = panelOperations(port, (change) => void changes.push(change), {
     track: (text, work) => {
       log.push(`… ${text}`);
       return work;
     },
     say: (text) => void log.push(text),
   });
-  return { port, log, ops };
+  return { port, log, ops, changes };
 };
 const from = { id: "ses_1", directory: "/work", server: { id: "local" } };
 
@@ -104,14 +110,28 @@ describe("panel operations", () => {
     expect(log).toEqual(["Copied 2 PRs from o/r."]);
   });
 
-  test("loads report progress and throw on failure, so the list can show the error", async () => {
+  test("refreshes go into the store, the same way a single watch's change does", async () => {
+    const { log, ops, changes } = setup();
+    await ops.refreshWatches();
+    await ops.refreshPrs(true);
+    expect(changes.map((c) => c.kind)).toEqual(["rows", "me", "prs"]);
+    expect(changes[2]).toMatchObject({ kind: "prs", merged: [{ number: 2 }] });
+    expect(log).toEqual(["… Loading your PRs…"]);
+  });
+
+  test("a PR refresh without the merged list leaves the store's merged list alone", async () => {
+    const { ops, changes } = setup();
+    await ops.refreshPrs(false);
+    expect(changes).toEqual([{ kind: "prs", open: [pr("o/r", 1)] }]);
+  });
+
+  test("topics report progress; failed loads throw, so the tab can show the error", async () => {
     const { port, log, ops } = setup();
-    expect((await ops.loadPrs(true)).merged?.length).toBe(1);
     expect(await ops.loadTopics("ses_1", false, false)).toEqual([{ name: "CI", prs: ["o/r#1"] }]);
     await ops.loadTopics("ses_1", false, true);
-    expect(log).toEqual(["… Loading your PRs…", "… Sorting your PRs into topics…", "… Updating the topics…"]);
+    expect(log).toEqual(["… Sorting your PRs into topics…", "… Updating the topics…"]);
     port.failing = "myPrs";
-    await expect(ops.loadPrs(false)).rejects.toThrow("myPrs broke");
+    await expect(ops.refreshPrs(false)).rejects.toThrow("myPrs broke");
   });
 });
 
@@ -133,15 +153,6 @@ describe("check now: the reload button makes every watch check GitHub", () => {
     port.failing = "checkNow";
     expect(await ops.checkNow()).toBe(false);
     expect(log.at(-1)).toBe("Could not ask the watches to check: checkNow broke");
-  });
-});
-
-describe("keepMerged: the merged list survives loads that didn't ask for it", () => {
-  test("replaced when asked for, kept otherwise", () => {
-    const before = { open: [], merged: [pr("o/r", 1)], watchedRows: [] };
-    expect(keepMerged(before, { open: [], merged: [pr("o/r", 2)], watchedRows: [] }, true).merged?.map((p) => p.number)).toEqual([2]);
-    expect(keepMerged(before, { open: [], merged: [], watchedRows: [] }, false).merged?.map((p) => p.number)).toEqual([1]);
-    expect(keepMerged(undefined, { open: [], merged: [], watchedRows: [] }, false).merged).toBeUndefined();
   });
 });
 
